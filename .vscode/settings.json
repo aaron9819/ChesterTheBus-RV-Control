@@ -1,0 +1,128 @@
+{
+  // ChesterTheBus RV Control - VS Code Settings
+
+  // ============================================
+  // GitHub Copilot Cache Settings
+  // ============================================
+  "github.copilot.enable": {
+    "*": true,
+    "yaml": true,
+    "plaintext": true,
+    "markdown": true,
+    "cpp": true,
+    "c": true,
+    "python": true
+  },
+
+  // Enable prompt caching for faster responses
+  "github.copilot.advanced": {
+    "cacheEnabled": true,
+    "cacheSize": 1000
+  },
+
+  // ============================================
+  // PlatformIO Cache Settings
+  // ============================================
+  "platformio-ide.useBuiltinPIOCore": true,
+  "platformio-ide.useDevelopmentPIOCore": false,
+  "platformio-ide.disablePIOHomeStartup": false,
+  "platformio-ide.activateOnlyOnPlatformIOProject": false,
+
+  // ============================================
+  // C/C++ IntelliSense Cache (for Arduino/ESP)
+  // ============================================
+  "C_Cpp.intelliSenseEngine": "default",
+  "C_Cpp.intelliSenseCacheSize": 10240,
+  "C_Cpp.intelliSenseCachePath": "${workspaceFolder}/.vscode/.cache",
+  "C_Cpp.default.compilerPath": "",
+  "C_Cpp.default.browse.limitSymbolsToIncludedHeaders": true,
+  "C_Cpp.enhancedColorization": "enabled",
+
+  // ============================================
+  // File Watchers and Caching
+  // ============================================
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/*/**": true,
+    "**/.pio/**": true,
+    "**/.vscode/.cache/**": true
+  },
+
+  "search.exclude": {
+    "**/.pio": true,
+    "**/node_modules": true,
+    "**/.cache": true,
+    "**/.git": true
+  },
+
+  // ============================================
+  // Terminal Settings
+  // ============================================
+  "terminal.integrated.env.osx": {
+    "PATH": "${env:HOME}/.platformio/penv/bin:${env:PATH}",
+    "PLATFORMIO_CACHE_DIR": "${workspaceFolder}/.pio/.cache",
+    "ANTHROPIC_API_KEY": "${env:ANTHROPIC_API_KEY}"
+  },
+
+  "terminal.integrated.env.linux": {
+    "PLATFORMIO_CACHE_DIR": "${workspaceFolder}/.pio/.cache",
+    "ANTHROPIC_API_KEY": "${env:ANTHROPIC_API_KEY}"
+  },
+
+  "terminal.integrated.env.windows": {
+    "PLATFORMIO_CACHE_DIR": "${workspaceFolder}/.pio/.cache",
+    "ANTHROPIC_API_KEY": "${env:ANTHROPIC_API_KEY}"
+  },
+
+  // ============================================
+  // Git Settings (don't commit cache)
+  // ============================================
+  "git.ignoreLimitWarning": true,
+
+  // ============================================
+  // Editor Performance Settings
+  // ============================================
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.trimFinalNewlines": true,
+
+  // ============================================
+  // Arduino/ESP8266/ESP32 Specific
+  // ============================================
+  "arduino.enableUSBDetection": true,
+  "arduino.disableTestingOpen": false,
+
+  // ============================================
+  // ChesterTheBus Project Specific
+  // ============================================
+  "files.associations": {
+    "*.ino": "cpp",
+    "*.h": "c",
+    "vector": "cpp",
+    "string": "cpp",
+    "array": "cpp",
+    "deque": "cpp",
+    "list": "cpp",
+    "unordered_map": "cpp"
+  },
+
+  // Auto-save for embedded development
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 1000,
+
+  // Formatting
+  "editor.formatOnSave": false,
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+
+  // ChesterTheBus documentation
+  "[markdown]": {
+    "editor.wordWrap": "on",
+    "editor.quickSuggestions": {
+      "comments": "on",
+      "strings": "on",
+      "other": "on"
+    }
+  }
+}
