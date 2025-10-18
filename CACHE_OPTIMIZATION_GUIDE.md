@@ -88,10 +88,10 @@ Your Anthropic API key is now loaded from environment:
 
 ```bash
 # In your terminal, set it once:
-export ANTHROPIC_API_KEY="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"
+export ANTHROPIC_API_KEY="your-api-key-here"
 
 # Or add to ~/.zshrc for permanent:
-echo 'export ANTHROPIC_API_KEY="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"' >> ~/.zshrc
+echo 'export ANTHROPIC_API_KEY="your-api-key-here"' >> ~/.zshrc
 ```
 
 VS Code will automatically use `${env:ANTHROPIC_API_KEY}` from your environment.
