@@ -244,24 +244,24 @@ void setup() {
   pinMode(DIESEL_HEATER_2_PIN, OUTPUT);
   pinMode(DIESEL_HEATER_3_PIN, OUTPUT);
 
-  // Initialize all relays to OFF
-  digitalWrite(FRESH_WATER_HEATER_PIN, LOW);
-  digitalWrite(GREY_WATER_HEATER_PIN, LOW);
-  digitalWrite(EXHAUST_FAN_PIN, LOW);
-  digitalWrite(REAR_LOOP_VALVE_PIN, LOW);
-  digitalWrite(ENGINE_LOOP_VALVE_PIN, LOW);
-  digitalWrite(DIESEL_HEATER_PIN, LOW);
-  digitalWrite(DIESEL_HEATER_2_PIN, LOW);
-  digitalWrite(DIESEL_HEATER_3_PIN, LOW);
+  // Initialize all relays to OFF (active LOW relays, so HIGH = OFF)
+  digitalWrite(FRESH_WATER_HEATER_PIN, HIGH);
+  digitalWrite(GREY_WATER_HEATER_PIN, HIGH);
+  digitalWrite(EXHAUST_FAN_PIN, HIGH);
+  digitalWrite(REAR_LOOP_VALVE_PIN, HIGH);
+  digitalWrite(ENGINE_LOOP_VALVE_PIN, HIGH);
+  digitalWrite(DIESEL_HEATER_PIN, HIGH);
+  digitalWrite(DIESEL_HEATER_2_PIN, HIGH);
+  digitalWrite(DIESEL_HEATER_3_PIN, HIGH);
 
   Serial.println("✓ Relay pins configured");
   Serial.println("  Note: Cabinet lock moved to separate dedicated board");
   Serial.println("  Note: BME280 sensor moved to separate dedicated board");
   Serial.println("  Note: Hot water solenoid & flow sensor moved to separate board");
   Serial.println("  Note: Diesel heater uses 3-state control (OFF/MID/HIGH)");
-  Serial.println("    OFF = All pins LOW");
-  Serial.println("    MID = Pins 1+2 HIGH, Pin 3 LOW");
-  Serial.println("    HIGH = Pins 1+3 HIGH, Pin 2 LOW");
+  Serial.println("    OFF = All pins HIGH");
+  Serial.println("    MID = Pins 1+2 HIGH, Pin 3 HIGH");
+  Serial.println("    HIGH = Pins 1+3 HIGH, Pin 2 HIGH");
 
   // Start WiFi connection
   setupWifi();
@@ -392,10 +392,10 @@ void setupOTA() {
     client.publish(Topic_OTA_Status, "UPDATING");
     client.publish(Topic_OTA_Progress, "0");
 
-    // Turn off all relays for safety during update
-    digitalWrite(FRESH_WATER_HEATER_PIN, LOW);
-    digitalWrite(GREY_WATER_HEATER_PIN, LOW);
-    digitalWrite(EXHAUST_FAN_PIN, LOW);
+    // Turn off all relays for safety during update (HIGH = OFF for active LOW relays)
+    digitalWrite(FRESH_WATER_HEATER_PIN, HIGH);
+    digitalWrite(GREY_WATER_HEATER_PIN, HIGH);
+    digitalWrite(EXHAUST_FAN_PIN, HIGH);
     controlDieselHeater("OFF");
 
     Serial.println("   Safety: All relays disabled during update");
@@ -932,31 +932,31 @@ void publishConfiguration() {
 // ============================================================================
 
 void controlFreshWaterHeater(bool turnOn) {
-  digitalWrite(FRESH_WATER_HEATER_PIN, turnOn ? HIGH : LOW);
+  digitalWrite(FRESH_WATER_HEATER_PIN, turnOn ? LOW : HIGH); // Active LOW
   freshWaterHeaterOn = turnOn;
   client.publish(Topic_FreshWtrHeat_Status, turnOn ? "ON" : "OFF");
 }
 
 void controlGreyWaterHeater(bool turnOn) {
-  digitalWrite(GREY_WATER_HEATER_PIN, turnOn ? HIGH : LOW);
+  digitalWrite(GREY_WATER_HEATER_PIN, turnOn ? LOW : HIGH); // Active LOW
   greyWaterHeaterOn = turnOn;
   client.publish(Topic_GreyWtrHeat_Status, turnOn ? "ON" : "OFF");
 }
 
 void controlExhaustFan(bool turnOn) {
-  digitalWrite(EXHAUST_FAN_PIN, turnOn ? HIGH : LOW);
+  digitalWrite(EXHAUST_FAN_PIN, turnOn ? LOW : HIGH); // Active LOW
   exhaustFanOn = turnOn;
   client.publish(Topic_ExhaustFan_Status, turnOn ? "ON" : "OFF");
 }
 
 void controlRearLoopValve(bool open) {
-  digitalWrite(REAR_LOOP_VALVE_PIN, open ? HIGH : LOW);
+  digitalWrite(REAR_LOOP_VALVE_PIN, open ? LOW : HIGH); // Active LOW
   rearLoopOpen = open;
   client.publish(Topic_RearLoop_Status, open ? "OPEN" : "CLOSED");
 }
 
 void controlEngineLoopValve(bool open) {
-  digitalWrite(ENGINE_LOOP_VALVE_PIN, open ? HIGH : LOW);
+  digitalWrite(ENGINE_LOOP_VALVE_PIN, open ? LOW : HIGH); // Active LOW
   engineLoopOpen = open;
   client.publish(Topic_EngineLoop_Status, open ? "OPEN" : "CLOSED");
 }
@@ -965,25 +965,25 @@ void controlDieselHeater(String state) {
   dieselHeaterState = state;
 
   if (state == "OFF") {
-    // OFF = All pins LOW
-    digitalWrite(DIESEL_HEATER_PIN, LOW);
-    digitalWrite(DIESEL_HEATER_2_PIN, LOW);
-    digitalWrite(DIESEL_HEATER_3_PIN, LOW);
-    Serial.println("🔥 Diesel Heater: OFF");
-  }
-  else if (state == "MID") {
-    // MID = Pins 1+2 HIGH, Pin 3 LOW
+    // OFF = All pins HIGH (relays off - active LOW)
     digitalWrite(DIESEL_HEATER_PIN, HIGH);
     digitalWrite(DIESEL_HEATER_2_PIN, HIGH);
-    digitalWrite(DIESEL_HEATER_3_PIN, LOW);
-    Serial.println("🔥 Diesel Heater: MID (Pins 1+2 active)");
+    digitalWrite(DIESEL_HEATER_3_PIN, HIGH);
+    Serial.println("🔥 Diesel Heater: OFF (all relays off)");
+  }
+  else if (state == "MID") {
+    // MID = Relays 1+2 ON (pins LOW), Relay 3 OFF (pin HIGH)
+    digitalWrite(DIESEL_HEATER_PIN, LOW);     // Relay 1 ON (white wire)
+    digitalWrite(DIESEL_HEATER_2_PIN, LOW);   // Relay 2 ON (blue wire)
+    digitalWrite(DIESEL_HEATER_3_PIN, HIGH);  // Relay 3 OFF (yellow wire)
+    Serial.println("🔥 Diesel Heater: MID (relays 1+2 active)");
   }
   else if (state == "HIGH") {
-    // HIGH = Pins 1+3 HIGH, Pin 2 LOW
-    digitalWrite(DIESEL_HEATER_PIN, HIGH);
-    digitalWrite(DIESEL_HEATER_2_PIN, LOW);
-    digitalWrite(DIESEL_HEATER_3_PIN, HIGH);
-    Serial.println("🔥 Diesel Heater: HIGH (Pins 1+3 active)");
+    // HIGH = Relays 1+3 ON (pins LOW), Relay 2 OFF (pin HIGH)
+    digitalWrite(DIESEL_HEATER_PIN, LOW);     // Relay 1 ON (white wire)
+    digitalWrite(DIESEL_HEATER_2_PIN, HIGH);  // Relay 2 OFF (blue wire)
+    digitalWrite(DIESEL_HEATER_3_PIN, LOW);   // Relay 3 ON (yellow wire)
+    Serial.println("🔥 Diesel Heater: HIGH (relays 1+3 active)");
   }
 
   client.publish(Topic_DieselHtr_Status, dieselHeaterState.c_str());

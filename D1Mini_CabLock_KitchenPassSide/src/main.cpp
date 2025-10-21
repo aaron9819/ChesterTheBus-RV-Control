@@ -177,6 +177,7 @@ void setup() {
   lockServo.attach(SERVO_PIN);
   lockServo.write(UNLOCKED_POSITION);
   currentState = STATE_UNLOCKED;
+  lockServo.detach();
   Serial.println("Servo initialized at UNLOCKED position");
 
   // Connect to WiFi

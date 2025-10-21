@@ -100,10 +100,14 @@ String hotWaterMode = "AUTO";  // AUTO or MANUAL
 
 // Flow Sensor State
 volatile unsigned long flowPulseCount = 0;
+volatile unsigned long lastPulseTime = 0;  // Time when last pulse occurred
+volatile unsigned long recentPulseCount = 0;  // Count pulses in recent window for threshold check
 float flowRate = 0.0;  // Liters per minute
 bool flowDetected = false;
 unsigned long lastFlowCalc = 0;
 const unsigned long FLOW_CALC_INTERVAL = 1000;  // Calculate flow every second
+const unsigned long FLOW_TIMEOUT = 3000;        // If no pulses for 3 seconds, flow has stopped
+const unsigned long MIN_PULSES_FOR_FLOW = 10;   // Minimum pulses per second to consider as real flow
 
 // BME280 Sensor Readings
 float temperature = 0.0;  // °F
@@ -288,9 +292,9 @@ void setup() {
   lockServo.detach();  // Detach to save power and reduce noise
   Serial.println("✓ Servo initialized at UNLOCKED position (D4)");
 
-  // Initialize hot water solenoid relay
+  // Initialize hot water solenoid relay (active LOW, so HIGH = OFF)
   pinMode(HOT_WATER_SOLENOID_PIN, OUTPUT);
-  digitalWrite(HOT_WATER_SOLENOID_PIN, LOW);
+  digitalWrite(HOT_WATER_SOLENOID_PIN, HIGH);
   hotWaterSolenoidOn = false;
   Serial.println("✓ Hot water solenoid relay initialized (D5)");
 
@@ -439,14 +443,14 @@ void loop() {
   }
   mqttClient.loop();
 
-  // Check flow sensor and hot water automation frequently (100ms)
+  // Calculate flow rate periodically (1 second)
+  if (millis() - lastFlowCalc >= FLOW_CALC_INTERVAL) {
+    calculateFlowRate();
+  }
+
+  // Check hot water automation frequently (100ms) for fast response
   if (millis() - lastFlowCheck >= FLOW_CHECK_INTERVAL) {
     lastFlowCheck = millis();
-
-    // Calculate flow rate
-    calculateFlowRate();
-
-    // Handle automatic hot water control (instant response)
     handleAutoHotWater();
   }
 
@@ -483,7 +487,7 @@ void loop() {
 // HOT WATER SOLENOID CONTROL
 // ============================================================================
 void controlHotWaterSolenoid(bool turnOn) {
-  digitalWrite(HOT_WATER_SOLENOID_PIN, turnOn ? HIGH : LOW);
+  digitalWrite(HOT_WATER_SOLENOID_PIN, turnOn ? LOW : HIGH); // Active LOW
   hotWaterSolenoidOn = turnOn;
 
   if (mqttClient.connected()) {
@@ -538,33 +542,58 @@ void publishBME280() {
 // ============================================================================
 void IRAM_ATTR flowSensorISR() {
   flowPulseCount++;
+  recentPulseCount++;
+  lastPulseTime = millis();  // Record when pulse occurred
 }
 
 void calculateFlowRate() {
   // Disable interrupts while reading pulse count
   noInterrupts();
   unsigned long pulses = flowPulseCount;
+  unsigned long recentPulses = recentPulseCount;
+  unsigned long lastPulse = lastPulseTime;
   flowPulseCount = 0;
+  recentPulseCount = 0;  // Reset recent counter
   interrupts();
 
   // Calculate flow rate (adjust calibration factor for your sensor)
   // YF-S201 sensor: ~450 pulses per liter
   // Flow rate (L/min) = (pulses / 450) * (60000 / interval_ms)
-  unsigned long interval = millis() - lastFlowCalc;
-  lastFlowCalc = millis();
+  unsigned long currentTime = millis();
+  unsigned long interval = currentTime - lastFlowCalc;
+  lastFlowCalc = currentTime;
 
   if (interval > 0) {
     flowRate = (pulses / 450.0) * (60000.0 / interval);
   }
 
-  // Update flow detected status
+  // Flow is detected if:
+  // 1. We received pulses in the last FLOW_TIMEOUT period, AND
+  // 2. The number of pulses meets the minimum threshold (filters out noise/drips)
   bool previousFlowDetected = flowDetected;
-  flowDetected = (flowRate > 0.1);  // Threshold: 0.1 L/min
+  unsigned long timeSinceLastPulse = currentTime - lastPulse;
+  bool hasRecentPulses = (timeSinceLastPulse < FLOW_TIMEOUT);
+  bool meetsThreshold = (recentPulses >= MIN_PULSES_FOR_FLOW);
+
+  flowDetected = hasRecentPulses && meetsThreshold;
 
   // Log flow status changes
   if (flowDetected != previousFlowDetected) {
     Serial.print("💦 Water flow: ");
     Serial.println(flowDetected ? "DETECTED" : "STOPPED");
+    if (flowDetected) {
+      Serial.print("   Flow rate: ");
+      Serial.print(flowRate);
+      Serial.print(" L/min (");
+      Serial.print(pulses);
+      Serial.println(" pulses)");
+    } else {
+      Serial.print("   Recent pulses: ");
+      Serial.print(recentPulses);
+      Serial.print(" (threshold: ");
+      Serial.print(MIN_PULSES_FOR_FLOW);
+      Serial.println(")");
+    }
   }
 }
 
@@ -592,13 +621,14 @@ void publishFlowRate() {
 void handleAutoHotWater() {
   if (hotWaterMode != "AUTO") return;
 
-  // In AUTO mode: Open solenoid when flow detected, close when stopped
+  // Simple logic: Turn on when flow detected, turn off when flow stopped
+  // flowDetected already has 3-second timeout built in
   if (flowDetected && !hotWaterSolenoidOn) {
     Serial.println("🔥 AUTO: Opening hot water solenoid (flow detected)");
     controlHotWaterSolenoid(true);
   }
   else if (!flowDetected && hotWaterSolenoidOn) {
-    Serial.println("❄️  AUTO: Closing hot water solenoid (flow stopped)");
+    Serial.println("❄️  AUTO: Closing hot water solenoid (no flow for 3+ seconds)");
     controlHotWaterSolenoid(false);
   }
 }
@@ -620,8 +650,8 @@ void setupOTA() {
     Serial.println("\n🔄 OTA Update Starting...");
     Serial.println("   Type: " + type);
 
-    // Turn off hot water solenoid for safety
-    digitalWrite(HOT_WATER_SOLENOID_PIN, LOW);
+    // Turn off hot water solenoid for safety (HIGH = OFF for active LOW relay)
+    digitalWrite(HOT_WATER_SOLENOID_PIN, HIGH);
     Serial.println("   Safety: Hot water solenoid disabled");
   });
 

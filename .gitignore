@@ -33,6 +33,7 @@ secrets.cpp
 *.key
 *.pem
 credentials.json
+setup-env.sh
 
 # ============================================
 # Compiled Binaries

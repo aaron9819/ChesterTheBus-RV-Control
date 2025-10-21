@@ -63,10 +63,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   for (unsigned int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
-  
+
   Serial.printf("MQTT message received on topic: %s - Message: ", topic);
   Serial.println(message);
-  
+
   message.trim();
   processCommand(message);
 }
@@ -74,7 +74,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 void processCommand(String command) {
   if (command == "LOCK") {
     lockCabinet();
-  } 
+  }
   else if (command == "UNLOCK") {
     unlockCabinet();
   }
@@ -104,7 +104,7 @@ void reconnectMQTT() {
     Serial.print(" as client: ");
     Serial.print(mqtt_client_id);
     Serial.print("...");
-    
+
     // Connect with or without credentials
     bool connected;
     if (strlen(mqtt_user) > 0) {
@@ -112,20 +112,20 @@ void reconnectMQTT() {
     } else {
       connected = mqttClient.connect(mqtt_client_id.c_str());
     }
-    
+
     if (connected) {
       Serial.println("connected");
-      
+
       // Subscribe to individual command topic
       mqttClient.subscribe(topic_cabinetLock_command.c_str());
       Serial.print("Subscribed to: ");
       Serial.println(topic_cabinetLock_command);
-      
+
       // Subscribe to group command topic (for controlling all locks at once)
       mqttClient.subscribe(topic_allLock_command);
       Serial.print("Subscribed to: ");
       Serial.println(topic_allLock_command);
-      
+
       // Send initial status
       sendStatus();
     } else {
@@ -140,7 +140,7 @@ void reconnectMQTT() {
 void setup() {
   Serial.begin(115200);
   delay(100);
-  
+
   Serial.println("\n\n=== ChesterTheBus D1 Mini Cabinet Lock Controller ===");
   Serial.print("Cabinet ID: ");
   Serial.println(CABINET_ID);
@@ -148,40 +148,41 @@ void setup() {
   Serial.println(topic_cabinetLock_command);
   Serial.print("Status Topic: ");
   Serial.println(topic_cabinetLock_status);
-  
+
   // Initialize servo
   lockServo.attach(SERVO_PIN);
   lockServo.write(UNLOCKED_POSITION);
   currentState = STATE_UNLOCKED;
+  lockServo.detach();
   Serial.println("Servo initialized at UNLOCKED position");
-  
+
   // Connect to WiFi
   Serial.print("Connecting to WiFi: ");
   Serial.println(ssid);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  
+
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 40) {
     delay(500);
     Serial.print(".");
     attempts++;
   }
-  
+
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nWiFi connected!");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
     Serial.print("MAC address: ");
     Serial.println(WiFi.macAddress());
-    
+
     // Setup MQTT
     mqttClient.setServer(mqtt_server, mqtt_port);
     mqttClient.setCallback(mqttCallback);
-    
+
     // Connect to MQTT broker
     reconnectMQTT();
-    
+
     Serial.println("Ready to receive lock/unlock commands via MQTT!");
     Serial.println("Commands: LOCK, UNLOCK, TOGGLE, STATUS");
   } else {
@@ -193,20 +194,20 @@ void setup() {
 void lockCabinet() {
   Serial.print(">>> LOCKING Cabinet: ");
   Serial.println(CABINET_ID);
-  
+
   // Ensure servo is attached before moving
   if (!lockServo.attached()) {
     lockServo.attach(SERVO_PIN);
   }
-  
+
   lockServo.write(LOCKED_POSITION);
   currentState = STATE_LOCKED;
   delay(500);  // Give servo time to move
-  
+
   // Disable servo to save power and reduce noise
   lockServo.detach();
   Serial.println("Servo disabled after locking");
-  
+
   // Publish status via MQTT
   if (mqttClient.connected()) {
     mqttClient.publish(topic_cabinetLock_status.c_str(), "LOCKED", true);  // Retained message
@@ -217,20 +218,20 @@ void lockCabinet() {
 void unlockCabinet() {
   Serial.print(">>> UNLOCKING Cabinet: ");
   Serial.println(CABINET_ID);
-  
+
   // Ensure servo is attached before moving
   if (!lockServo.attached()) {
     lockServo.attach(SERVO_PIN);
   }
-  
+
   lockServo.write(UNLOCKED_POSITION);
   currentState = STATE_UNLOCKED;
   delay(500);  // Give servo time to move
-  
+
   // Disable servo to save power and reduce noise
   lockServo.detach();
   Serial.println("Servo disabled after unlocking");
-  
+
   // Publish status via MQTT
   if (mqttClient.connected()) {
     mqttClient.publish(topic_cabinetLock_status.c_str(), "UNLOCKED", true);  // Retained message
@@ -249,7 +250,7 @@ void sendStatus() {
     } else {
       status = "UNKNOWN";
     }
-    
+
     mqttClient.publish(topic_cabinetLock_status.c_str(), status, true);
     Serial.print("Status published for ");
     Serial.print(CABINET_ID);
@@ -273,18 +274,18 @@ void loop() {
       Serial.println("\nWiFi reconnected!");
     }
   }
-  
+
   // Keep MQTT connection alive
   if (!mqttClient.connected()) {
     reconnectMQTT();
   }
   mqttClient.loop();
-  
+
   // Periodically send status update (for monitoring/debugging)
   if (millis() - lastStatusUpdate > STATUS_INTERVAL) {
     sendStatus();
     lastStatusUpdate = millis();
   }
-  
+
   delay(10);
 }

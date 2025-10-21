@@ -1,14 +1,12 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <Servo.h>
-#include <ArduinoOTA.h>
 
 // ============================================
 // CONFIGURATION - Change for each D1 Mini
 // ============================================
 // Set unique cabinet identifier for each D1 Mini
-#define CABINET_ID "RearDriverSide"  // Options: kitchen1, kitchen2, bathroom, bedroom, etc.
-#define FIRMWARE_VERSION "v1.1.0"
+#define CABINET_ID "KitchenUpperPassSide"  // Options: kitchen1, kitchen2, bathroom, bedroom, etc.
 
 // WiFi Configuration
 const char* ssid = "Chester IOT";
@@ -19,10 +17,6 @@ const char* mqtt_server = "192.168.8.1";  // Router IP address
 const int mqtt_port = 1883;
 const char* mqtt_user = "";  // No username
 const char* mqtt_password = "";  // No password
-
-// OTA Configuration
-const char* otaHostname = "CabLock-RearDriverSide";
-const char* otaPassword = "Chester2025";
 
 // MQTT Client ID - Unique per device
 String mqtt_client_id = String("CabLock_") + String(CABINET_ID);
@@ -37,8 +31,8 @@ const char* topic_allLock_command = "CabLockAllCommand";  // Group control
 Servo lockServo;
 
 // Lock positions (adjust based on your servo/latch mechanism)
-#define LOCKED_POSITION 90
-#define UNLOCKED_POSITION 5
+#define LOCKED_POSITION 5
+#define UNLOCKED_POSITION 90
 
 // MQTT Client
 WiFiClient wifiClient;
@@ -54,11 +48,6 @@ enum LockState {
 LockState currentState = STATE_UNKNOWN;
 unsigned long lastStatusUpdate = 0;
 const unsigned long STATUS_INTERVAL = 60000; // Send status every 60 seconds
-
-// Command deduplication
-String lastCommand = "";
-unsigned long lastCommandTime = 0;
-const unsigned long COMMAND_COOLDOWN_MS = 1000; // Ignore duplicate commands within 1 second
 
 // Forward declarations
 void mqttCallback(char* topic, byte* payload, unsigned int length);
@@ -83,19 +72,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 void processCommand(String command) {
-  unsigned long currentMillis = millis();
-
-  // Ignore duplicate commands within cooldown period (except STATUS)
-  if (command != "STATUS") {
-    if (command == lastCommand && (currentMillis - lastCommandTime) < COMMAND_COOLDOWN_MS) {
-      Serial.print("⚠️  Ignoring duplicate command within cooldown: ");
-      Serial.println(command);
-      return;
-    }
-    lastCommand = command;
-    lastCommandTime = currentMillis;
-  }
-
   if (command == "LOCK") {
     lockCabinet();
   }
@@ -200,46 +176,6 @@ void setup() {
     Serial.print("MAC address: ");
     Serial.println(WiFi.macAddress());
 
-    // Setup OTA (Over-The-Air) updates
-    ArduinoOTA.setHostname(otaHostname);
-    ArduinoOTA.setPassword(otaPassword);
-
-    ArduinoOTA.onStart([]() {
-      Serial.println("\n🔄 OTA Update Starting...");
-      // Detach servo during update for safety
-      if (lockServo.attached()) {
-        lockServo.detach();
-      }
-    });
-
-    ArduinoOTA.onEnd([]() {
-      Serial.println("\n✓ OTA Update Complete! Rebooting...");
-    });
-
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-      static int lastPercent = -1;
-      int percentComplete = (progress / (total / 100));
-      if (percentComplete != lastPercent && percentComplete % 10 == 0) {
-        Serial.printf("   Progress: %u%%\n", percentComplete);
-        lastPercent = percentComplete;
-      }
-    });
-
-    ArduinoOTA.onError([](ota_error_t error) {
-      Serial.printf("\n✗ OTA Error[%u]: ", error);
-      if (error == OTA_AUTH_ERROR) Serial.println("Authentication Failed");
-      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-      else if (error == OTA_END_ERROR) Serial.println("End Failed");
-    });
-
-    ArduinoOTA.begin();
-    Serial.println("✓ OTA enabled");
-    Serial.print("  Hostname: ");
-    Serial.print(otaHostname);
-    Serial.println(".local");
-
     // Setup MQTT
     mqttClient.setServer(mqtt_server, mqtt_port);
     mqttClient.setCallback(mqttCallback);
@@ -249,8 +185,6 @@ void setup() {
 
     Serial.println("Ready to receive lock/unlock commands via MQTT!");
     Serial.println("Commands: LOCK, UNLOCK, TOGGLE, STATUS");
-    Serial.print("Firmware: ");
-    Serial.println(FIRMWARE_VERSION);
   } else {
     Serial.println("\nWiFi connection failed!");
     Serial.println("Will retry in loop...");
@@ -340,9 +274,6 @@ void loop() {
       Serial.println("\nWiFi reconnected!");
     }
   }
-
-  // Handle OTA updates
-  ArduinoOTA.handle();
 
   // Keep MQTT connection alive
   if (!mqttClient.connected()) {

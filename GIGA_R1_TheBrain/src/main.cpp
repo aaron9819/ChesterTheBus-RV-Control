@@ -2,6 +2,10 @@
 #include "Arduino_GigaDisplayTouch.h"
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <ArduinoOTA.h>
 
 // ============================================================================
 // GIGA R1 "THE BRAIN" - ChesterTheBus RV Control
@@ -31,11 +35,14 @@ const char* topic_lock_kitchen_driver_status = "CabLockKitchenDriverSideStatus";
 const char* topic_lock_kitchen_pass_cmd = "CabLockKitchenPassSideCommand";
 const char* topic_lock_kitchen_pass_status = "CabLockKitchenPassSideStatus";
 
+const char* topic_lock_kitchen_upper_cmd = "CabLockKitchenUpperPassSideCommand";
+const char* topic_lock_kitchen_upper_status = "CabLockKitchenUpperPassSideStatus";
+
 const char* topic_lock_rear_driver_cmd = "CabLockRearDriverSideCommand";
 const char* topic_lock_rear_driver_status = "CabLockRearDriverSideStatus";
 
-const char* topic_lock_plumbing_cmd = "CabLockRearPassSideCommand";  // D1 Plumbing cabinet
-const char* topic_lock_plumbing_status = "CabLockRearPassSideStatus";
+const char* topic_lock_rear_pass_cmd = "CabLockRearPassSideCommand";  // Environment board with cabinet lock
+const char* topic_lock_rear_pass_status = "CabLockRearPassSideStatus";
 
 const char* topic_lock_all_cmd = "CabLockAllCommand";  // Control all locks at once
 
@@ -43,9 +50,34 @@ const char* topic_lock_all_cmd = "CabLockAllCommand";  // Control all locks at o
 const char* topic_giga_status = "GIGASystemStatus";
 const char* topic_giga_uptime = "GIGAUptime";
 
+// Plumbing system control topics
+const char* topic_fresh_water_heat_cmd = "FreshWaterHeatCommand";
+const char* topic_fresh_water_heat_status = "FreshWaterHeatStatus";
+const char* topic_grey_water_heat_cmd = "GreyWaterHeatCommand";
+const char* topic_grey_water_heat_status = "GreyWaterHeatStatus";
+const char* topic_exhaust_fan_cmd = "ExhaustFanCommand";
+const char* topic_exhaust_fan_status = "ExhaustFanStatus";
+const char* topic_engine_loop_cmd = "EngineLoopCommand";
+const char* topic_engine_loop_status = "EngineLoopStatus";
+const char* topic_diesel_heater_cmd = "DieselHeaterCommand";
+const char* topic_diesel_heater_status = "DieselHeaterStatus";
+
+// Rear loop and thermostat topics (shared between plumbing and thermostat pages)
+const char* topic_rear_loop_cmd = "RearLoopCommand";
+const char* topic_rear_loop_status = "RearLoopStatus";
+const char* topic_rear_thermostat_temp = "RearThermostatTemperature";
+const char* topic_rear_thermostat_humidity = "RearThermostatHumidity";
+const char* topic_rear_thermostat_pressure = "RearThermostatPressure";
+const char* topic_rear_thermostat_setpoint = "RearThermostatSetpoint";
+const char* topic_rear_thermostat_mode = "RearThermostatMode";  // AUTO/OFF
+
 // ----------------- MQTT Client -----------------
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
+
+// ----------------- BME280 Sensor -----------------
+Adafruit_BME280 bme;
+bool bmeAvailable = false;
 
 // ----------------- Display Configuration -----------------
 GigaDisplay_GFX display;
@@ -69,6 +101,7 @@ Arduino_GigaDisplayTouch touchDetector;
 #define TOUCH_THRESHOLD 50
 unsigned long lastTouchTime = 0;
 const unsigned long TOUCH_DEBOUNCE_MS = 500;  // Increased from 300ms to 500ms
+bool touchCurrentlyPressed = false;  // Track if touch is being held down
 
 // ----------------- Lock State -----------------
 enum LockState {
@@ -90,19 +123,22 @@ struct CabinetLock {
   int buttonHeight;
 };
 
-// Cabinet lock definitions (4 locks total)
-CabinetLock locks[4] = {
+// Cabinet lock definitions (5 locks total)
+CabinetLock locks[5] = {
   {"Kitchen Driver", topic_lock_kitchen_driver_cmd, topic_lock_kitchen_driver_status,
    STATE_UNKNOWN, 0, 50, 100, 340, 70},
 
   {"Kitchen Pass", topic_lock_kitchen_pass_cmd, topic_lock_kitchen_pass_status,
    STATE_UNKNOWN, 0, 410, 100, 340, 70},
 
-  {"Rear Driver", topic_lock_rear_driver_cmd, topic_lock_rear_driver_status,
+  {"Kitchen Upper", topic_lock_kitchen_upper_cmd, topic_lock_kitchen_upper_status,
    STATE_UNKNOWN, 0, 50, 190, 340, 70},
 
-  {"Plumbing", topic_lock_plumbing_cmd, topic_lock_plumbing_status,
-   STATE_UNKNOWN, 0, 410, 190, 340, 70}
+  {"Rear Driver", topic_lock_rear_driver_cmd, topic_lock_rear_driver_status,
+   STATE_UNKNOWN, 0, 410, 190, 340, 70},
+
+  {"Rear Pass/Env", topic_lock_rear_pass_cmd, topic_lock_rear_pass_status,
+   STATE_UNKNOWN, 0, 50, 280, 340, 70}
 };
 
 // Lock All / Unlock All buttons
@@ -117,8 +153,8 @@ struct ControlButton {
 };
 
 ControlButton controlButtons[2] = {
-  {"LOCK ALL", "LOCK", 50, 300, 340, 70, COLOR_LOCKED},
-  {"UNLOCK ALL", "UNLOCK", 410, 300, 340, 70, COLOR_UNLOCKED}
+  {"LOCK ALL", "LOCK", 50, 370, 340, 70, COLOR_LOCKED},
+  {"UNLOCK ALL", "UNLOCK", 410, 370, 340, 70, COLOR_UNLOCKED}
 };
 
 const unsigned long COMMAND_TIMEOUT = 3000;  // 3 seconds
@@ -127,6 +163,41 @@ const unsigned long COMMAND_TIMEOUT = 3000;  // 3 seconds
 unsigned long lastStatusPublish = 0;
 const unsigned long STATUS_PUBLISH_INTERVAL = 60000;  // 60 seconds
 bool uiNeedsRedraw = true;
+bool backlightOn = true;  // Track backlight state
+unsigned long lastUserInteraction = 0;  // Track last touch time for screen timeout
+const unsigned long SCREEN_TIMEOUT_MS = 300000;  // 5 minutes = 300,000ms
+
+// ----------------- UI Pages -----------------
+enum UIPage {
+  PAGE_CABINET_LOCKS,
+  PAGE_THERMOSTAT,
+  PAGE_PLUMBING
+};
+
+UIPage currentPage = PAGE_CABINET_LOCKS;
+
+// ----------------- Rear Thermostat State -----------------
+float rearTemperature = 0.0;      // °F
+float rearHumidity = 0.0;         // %
+float rearPressure = 0.0;         // hPa
+float rearThermostatSetpoint = 68.0;  // °F
+String rearThermostatMode = "OFF";  // AUTO or OFF
+bool rearLoopOpen = false;
+unsigned long lastThermostatRead = 0;
+unsigned long lastThermostatControl = 0;
+unsigned long lastThermostatButtonPress = 0;  // Track button press timing
+const unsigned long THERMOSTAT_READ_INTERVAL = 5000;    // 5 seconds
+const unsigned long THERMOSTAT_CONTROL_INTERVAL = 30000; // 30 seconds
+const unsigned long THERMOSTAT_BUTTON_COOLDOWN = 300;   // 300ms cooldown between button presses
+const float THERMOSTAT_HYSTERESIS = 1.0;  // °F
+
+// ----------------- Plumbing System State -----------------
+bool freshWaterHeaterOn = false;
+bool greyWaterHeaterOn = false;
+bool exhaustFanOn = false;
+bool rearLoopValveOpen = false;
+bool engineLoopValveOpen = false;
+String dieselHeaterState = "OFF";  // OFF, MID, or HIGH
 
 // ============================================================================
 // FUNCTION DECLARATIONS
@@ -144,6 +215,19 @@ void handleTouch();
 void sendLockCommand(int lockIndex, const char* command);
 void sendLockAllCommand(const char* command);
 void updateLockStates();
+void setupOTA();
+void readBME280();
+void publishThermostatReadings();
+void handleThermostatControl();
+void controlRearLoop(bool open);
+void drawThermostatPage();
+void handleThermostatTouch();
+void drawPageNav();
+void wakeScreen();
+void checkScreenTimeout();
+void drawPlumbingPage();
+void handlePlumbingTouch();
+void sendPlumbingCommand(const char* topic, const char* command);
 
 // ============================================================================
 // SETUP
@@ -185,6 +269,22 @@ void setup() {
     Serial.println("✗ Touch initialization failed");
   }
 
+  // Initialize I2C for BME280 (using default SDA/SCL pins)
+  Wire.begin();
+  Serial.println("✓ I2C initialized");
+
+  // Initialize BME280 sensor
+  if (bme.begin(0x76)) {  // Try default address 0x76
+    bmeAvailable = true;
+    Serial.println("✓ BME280 sensor found at address 0x76");
+  } else if (bme.begin(0x77)) {  // Try alternate address 0x77
+    bmeAvailable = true;
+    Serial.println("✓ BME280 sensor found at address 0x77");
+  } else {
+    bmeAvailable = false;
+    Serial.println("⚠ BME280 sensor NOT found!");
+  }
+
   // Connect to WiFi
   setupWiFi();
 
@@ -195,6 +295,18 @@ void setup() {
 
   // Connect to MQTT
   reconnectMQTT();
+
+  // Setup OTA updates
+  // Note: OTA temporarily disabled - use USB upload
+  // setupOTA();
+
+  // Initial BME280 reading
+  if (bmeAvailable) {
+    readBME280();
+  }
+
+  // Initialize screen timeout
+  lastUserInteraction = millis();
 
   // Draw initial UI
   drawUI();
@@ -209,6 +321,9 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
+  // Handle OTA updates
+  // ArduinoOTA.handle();  // Disabled - use USB upload
+
   // Maintain MQTT connection
   if (!mqttClient.connected()) {
     reconnectMQTT();
@@ -216,10 +331,34 @@ void loop() {
   mqttClient.loop();
 
   // Handle touch input
-  handleTouch();
+  if (currentPage == PAGE_CABINET_LOCKS) {
+    handleTouch();
+  } else if (currentPage == PAGE_THERMOSTAT) {
+    handleThermostatTouch();
+  } else if (currentPage == PAGE_PLUMBING) {
+    handlePlumbingTouch();
+  }
 
   // Update lock states (check for timeouts)
   updateLockStates();
+
+  // Read BME280 sensor periodically
+  if (currentMillis - lastThermostatRead >= THERMOSTAT_READ_INTERVAL) {
+    lastThermostatRead = currentMillis;
+    if (bmeAvailable) {
+      readBME280();
+      publishThermostatReadings();
+      if (currentPage == PAGE_THERMOSTAT) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  // Handle thermostat control logic
+  if (currentMillis - lastThermostatControl >= THERMOSTAT_CONTROL_INTERVAL) {
+    lastThermostatControl = currentMillis;
+    handleThermostatControl();
+  }
 
   // Redraw UI if needed
   if (uiNeedsRedraw) {
@@ -232,6 +371,9 @@ void loop() {
     lastStatusPublish = currentMillis;
     publishSystemStatus();
   }
+
+  // Check for screen timeout
+  checkScreenTimeout();
 
   delay(10);
 }
@@ -305,7 +447,7 @@ void reconnectMQTT() {
 
     // Request initial status from all locks
     Serial.println("Requesting initial lock states...");
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
       mqttClient.publish(locks[i].cmdTopic, "STATUS");
     }
 
@@ -323,10 +465,24 @@ void subscribeToTopics() {
   // Subscribe to all cabinet lock status topics
   mqttClient.subscribe(topic_lock_kitchen_driver_status);
   mqttClient.subscribe(topic_lock_kitchen_pass_status);
+  mqttClient.subscribe(topic_lock_kitchen_upper_status);
   mqttClient.subscribe(topic_lock_rear_driver_status);
-  mqttClient.subscribe(topic_lock_plumbing_status);
+  mqttClient.subscribe(topic_lock_rear_pass_status);
 
-  Serial.println("✓ Subscribed to cabinet lock status topics");
+  // Subscribe to plumbing system status topics
+  mqttClient.subscribe(topic_fresh_water_heat_status);
+  mqttClient.subscribe(topic_grey_water_heat_status);
+  mqttClient.subscribe(topic_exhaust_fan_status);
+  mqttClient.subscribe(topic_rear_loop_status);
+  mqttClient.subscribe(topic_engine_loop_status);
+  mqttClient.subscribe(topic_diesel_heater_status);
+
+  // Subscribe to thermostat topics
+  mqttClient.subscribe(topic_rear_loop_status);
+
+  Serial.println("✓ Subscribed to cabinet lock status topics (5 locks)");
+  Serial.println("✓ Subscribed to plumbing system status topics");
+  Serial.println("✓ Subscribed to thermostat topics");
 }
 
 // ============================================================================
@@ -345,7 +501,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.println(message);
 
   // Update lock states based on status messages
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 5; i++) {
     if (String(topic) == locks[i].statusTopic) {
       LockState newState = STATE_UNKNOWN;
 
@@ -364,6 +520,91 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         Serial.println(message);
       }
       break;
+    }
+  }
+
+  // Update rear loop status
+  if (String(topic) == topic_rear_loop_status) {
+    bool newStatus = (message == "OPEN");
+    if (rearLoopOpen != newStatus) {
+      rearLoopOpen = newStatus;
+      Serial.print("  → Rear loop: ");
+      Serial.println(message);
+      if (currentPage == PAGE_THERMOSTAT) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  // Update plumbing system status
+  if (String(topic) == topic_fresh_water_heat_status) {
+    bool newStatus = (message == "ON");
+    if (freshWaterHeaterOn != newStatus) {
+      freshWaterHeaterOn = newStatus;
+      Serial.print("  → Fresh water heater: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_grey_water_heat_status) {
+    bool newStatus = (message == "ON");
+    if (greyWaterHeaterOn != newStatus) {
+      greyWaterHeaterOn = newStatus;
+      Serial.print("  → Grey water heater: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_exhaust_fan_status) {
+    bool newStatus = (message == "ON");
+    if (exhaustFanOn != newStatus) {
+      exhaustFanOn = newStatus;
+      Serial.print("  → Exhaust fan: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_rear_loop_status) {
+    bool newStatus = (message == "OPEN");
+    if (rearLoopValveOpen != newStatus) {
+      rearLoopValveOpen = newStatus;
+      Serial.print("  → Rear loop valve: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_engine_loop_status) {
+    bool newStatus = (message == "OPEN");
+    if (engineLoopValveOpen != newStatus) {
+      engineLoopValveOpen = newStatus;
+      Serial.print("  → Engine loop valve: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_diesel_heater_status) {
+    if (dieselHeaterState != message) {
+      dieselHeaterState = message;
+      Serial.print("  → Diesel heater: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
     }
   }
 }
@@ -394,17 +635,31 @@ void publishSystemStatus() {
 void drawUI() {
   display.fillScreen(COLOR_BACKGROUND);
 
-  // Draw header
-  drawHeader();
-
-  // Draw individual lock buttons
-  for (int i = 0; i < 4; i++) {
-    drawLockButton(i);
+  // If backlight is off, just show black screen
+  if (!backlightOn) {
+    return;
   }
 
-  // Draw control buttons (Lock All / Unlock All)
-  for (int i = 0; i < 2; i++) {
-    drawControlButton(i);
+  if (currentPage == PAGE_CABINET_LOCKS) {
+    // Draw header
+    drawHeader();
+
+    // Draw page navigation
+    drawPageNav();
+
+    // Draw individual lock buttons
+    for (int i = 0; i < 5; i++) {
+      drawLockButton(i);
+    }
+
+    // Draw control buttons (Lock All / Unlock All)
+    for (int i = 0; i < 2; i++) {
+      drawControlButton(i);
+    }
+  } else if (currentPage == PAGE_THERMOSTAT) {
+    drawThermostatPage();
+  } else if (currentPage == PAGE_PLUMBING) {
+    drawPlumbingPage();
   }
 
   // Draw footer with connection status
@@ -436,6 +691,9 @@ void drawHeader() {
   display.setTextSize(2);
   display.setCursor(270, 42);
   display.println("Cabinet Locks");
+
+  // Page navigation tabs in header
+  drawPageNav();
 }
 
 // ============================================================================
@@ -517,15 +775,40 @@ void drawControlButton(int btnIndex) {
 void handleTouch() {
   unsigned long currentMillis = millis();
 
-  if (currentMillis - lastTouchTime < TOUCH_DEBOUNCE_MS) {
-    return;  // Debounce
-  }
-
   uint8_t contacts;
   GDTpoint_t points[5];
   contacts = touchDetector.getTouchPoints(points);
 
+  // Detect touch release
+  if (contacts == 0) {
+    if (touchCurrentlyPressed) {
+      touchCurrentlyPressed = false;
+      Serial.println("Touch released");
+    }
+    return;
+  }
+
+  // If touch is still being held down from previous press, ignore
+  if (touchCurrentlyPressed) {
+    return;
+  }
+
+  // Debounce check
+  if (currentMillis - lastTouchTime < TOUCH_DEBOUNCE_MS) {
+    return;
+  }
+
   if (contacts > 0) {
+    // If screen is off, just wake it and don't process the touch
+    if (!backlightOn) {
+      wakeScreen();
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;  // Prevent immediate button press after wake
+      return;
+    }
+
+    // Update last user interaction time
+    lastUserInteraction = currentMillis;
     // Raw touch coordinates (portrait mode: 480x800)
     int rawX = points[0].x;
     int rawY = points[0].y;
@@ -546,8 +829,43 @@ void handleTouch() {
     Serial.print(" Y:");
     Serial.println(y);
 
+    // Check page navigation buttons first (in header: y 10-50)
+    if (y >= 10 && y <= 50) {
+      if (x >= 395 && x <= 525) {
+        // Locks page button
+        if (currentPage != PAGE_CABINET_LOCKS) {
+          currentPage = PAGE_CABINET_LOCKS;
+          uiNeedsRedraw = true;
+          Serial.println("Switched to Locks page");
+        }
+        lastTouchTime = currentMillis;
+        touchCurrentlyPressed = true;
+        return;
+      } else if (x >= 535 && x <= 665) {
+        // Thermostat page button
+        if (currentPage != PAGE_THERMOSTAT) {
+          currentPage = PAGE_THERMOSTAT;
+          uiNeedsRedraw = true;
+          Serial.println("Switched to Thermostat page");
+        }
+        lastTouchTime = currentMillis;
+        touchCurrentlyPressed = true;
+        return;
+      } else if (x >= 675 && x <= 790) {
+        // Plumbing page button
+        if (currentPage != PAGE_PLUMBING) {
+          currentPage = PAGE_PLUMBING;
+          uiNeedsRedraw = true;
+          Serial.println("Switched to Plumbing page");
+        }
+        lastTouchTime = currentMillis;
+        touchCurrentlyPressed = true;
+        return;
+      }
+    }
+
     // Check individual lock buttons
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
       CabinetLock& lock = locks[i];
       if (x >= lock.buttonX && x <= (lock.buttonX + lock.buttonWidth) &&
           y >= lock.buttonY && y <= (lock.buttonY + lock.buttonHeight)) {
@@ -626,7 +944,7 @@ void sendLockAllCommand(const char* command) {
   Serial.println(command);
 
   // Send command to all individual locks
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 5; i++) {
     mqttClient.publish(locks[i].cmdTopic, command);
     locks[i].state = STATE_WAITING;
     locks[i].lastCommandTime = millis();
@@ -646,7 +964,7 @@ void updateLockStates() {
   bool stateChanged = false;
 
   // Check for command timeouts
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 5; i++) {
     if (locks[i].state == STATE_WAITING) {
       if (currentMillis - locks[i].lastCommandTime > COMMAND_TIMEOUT) {
         // Command timed out - mark as unknown
@@ -664,3 +982,673 @@ void updateLockStates() {
     uiNeedsRedraw = true;
   }
 }
+
+// ============================================================================
+// SETUP OTA UPDATES
+// ============================================================================
+void setupOTA() {
+  // GIGA R1 uses InternalStorage (defined as extern in library)
+  auto ip = WiFi.localIP();
+
+  // Begin OTA with GIGA R1 specific API
+  ArduinoOTA.begin(ip, "GIGA-TheBrain", "Chester2025", InternalStorage);
+
+  Serial.println("✓ OTA initialized");
+  Serial.print("  IP Address: ");
+  Serial.println(ip);
+  Serial.println("  Name: GIGA-TheBrain");
+  Serial.println("  Password: Chester2025");
+  Serial.println("  Note: Use Arduino IDE for OTA uploads");
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+// dtostrf replacement for GIGA R1 (ARM doesn't have dtostrf)
+char* dtostrf(double val, signed char width, unsigned char prec, char* sout) {
+  char fmt[20];
+  sprintf(fmt, "%%%d.%df", width, prec);
+  sprintf(sout, fmt, val);
+  return sout;
+}
+
+// ============================================================================
+// BME280 SENSOR READING
+// ============================================================================
+void readBME280() {
+  if (!bmeAvailable) return;
+
+  float tempC = bme.readTemperature();
+  rearTemperature = (tempC * 9.0 / 5.0) + 32.0;  // Convert to Fahrenheit
+  rearHumidity = bme.readHumidity();
+  rearPressure = bme.readPressure() / 100.0F;  // Convert to hPa
+}
+
+void publishThermostatReadings() {
+  if (!mqttClient.connected()) return;
+
+  char tempStr[8];
+
+  // Publish temperature
+  dtostrf(rearTemperature, 4, 2, tempStr);
+  mqttClient.publish(topic_rear_thermostat_temp, tempStr);
+
+  // Publish humidity
+  dtostrf(rearHumidity, 4, 2, tempStr);
+  mqttClient.publish(topic_rear_thermostat_humidity, tempStr);
+
+  // Publish pressure
+  dtostrf(rearPressure, 6, 2, tempStr);
+  mqttClient.publish(topic_rear_thermostat_pressure, tempStr);
+
+  // Publish setpoint and mode
+  dtostrf(rearThermostatSetpoint, 4, 1, tempStr);
+  mqttClient.publish(topic_rear_thermostat_setpoint, tempStr);
+  mqttClient.publish(topic_rear_thermostat_mode, rearThermostatMode.c_str());
+}
+
+// ============================================================================
+// THERMOSTAT CONTROL LOGIC
+// ============================================================================
+void handleThermostatControl() {
+  if (!bmeAvailable || rearThermostatMode != "AUTO") return;
+
+  // Hysteresis logic
+  if (rearTemperature < (rearThermostatSetpoint - THERMOSTAT_HYSTERESIS)) {
+    // Too cold - open rear loop to allow heat
+    if (!rearLoopOpen) {
+      Serial.println("🌡️ Thermostat: Opening rear loop (heating)");
+      controlRearLoop(true);
+    }
+  }
+  else if (rearTemperature > (rearThermostatSetpoint + THERMOSTAT_HYSTERESIS)) {
+    // Too hot - close rear loop
+    if (rearLoopOpen) {
+      Serial.println("🌡️ Thermostat: Closing rear loop (cooling)");
+      controlRearLoop(false);
+    }
+  }
+  // Within hysteresis band - maintain current state
+}
+
+void controlRearLoop(bool open) {
+  if (!mqttClient.connected()) return;
+
+  mqttClient.publish(topic_rear_loop_cmd, open ? "OPEN" : "CLOSE");
+
+  Serial.print("💧 Rear loop command sent: ");
+  Serial.println(open ? "OPEN" : "CLOSE");
+}
+
+// ============================================================================
+// DRAW THERMOSTAT PAGE
+// ============================================================================
+void drawThermostatPage() {
+  // Header
+  display.fillRect(0, 0, SCREEN_WIDTH, 60, COLOR_HEADER);
+  display.setTextSize(3);
+  display.setTextColor(COLOR_TEXT_WHITE);
+  display.setCursor(250, 18);
+  display.println("Rear Thermostat");
+
+  // Page navigation tabs in header
+  drawPageNav();
+
+  // Current temperature - large display
+  display.setTextSize(6);
+  display.setTextColor(COLOR_TEXT_WHITE);
+  display.setCursor(280, 90);
+  char tempStr[10];
+  dtostrf(rearTemperature, 4, 1, tempStr);
+  display.print(tempStr);
+  display.setTextSize(4);
+  display.println(" F");
+
+  // Humidity and Pressure
+  display.setTextSize(2);
+  display.setCursor(250, 180);
+  display.print("Humidity: ");
+  dtostrf(rearHumidity, 4, 1, tempStr);
+  display.print(tempStr);
+  display.println("%");
+
+  display.setCursor(230, 210);
+  display.print("Pressure: ");
+  dtostrf(rearPressure, 6, 1, tempStr);
+  display.print(tempStr);
+  display.println(" hPa");
+
+  // Setpoint display
+  display.setTextSize(3);
+  display.setCursor(280, 260);
+  display.print("Set: ");
+  dtostrf(rearThermostatSetpoint, 4, 1, tempStr);
+  display.print(tempStr);
+  display.println(" F");
+
+  // Temp down button
+  display.fillRoundRect(100, 320, 120, 80, 10, COLOR_HEADER);
+  display.drawRoundRect(100, 320, 120, 80, 10, COLOR_BORDER);
+  display.setTextSize(5);
+  display.setTextColor(COLOR_TEXT_WHITE);
+  display.setCursor(135, 340);
+  display.println("-");
+
+  // Temp up button
+  display.fillRoundRect(580, 320, 120, 80, 10, COLOR_HEADER);
+  display.drawRoundRect(580, 320, 120, 80, 10, COLOR_BORDER);
+  display.setTextSize(5);
+  display.setTextColor(COLOR_TEXT_WHITE);
+  display.setCursor(615, 340);
+  display.println("+");
+
+  // Mode button (AUTO/OFF)
+  uint16_t modeColor = (rearThermostatMode == "AUTO") ? COLOR_UNLOCKED : COLOR_UNKNOWN;
+  display.fillRoundRect(300, 320, 200, 80, 10, modeColor);
+  display.drawRoundRect(300, 320, 200, 80, 10, COLOR_BORDER);
+  display.setTextSize(3);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(335, 345);
+  display.println(rearThermostatMode);
+
+  // Rear loop status indicator
+  uint16_t statusColor = rearLoopOpen ? COLOR_LOCKED : COLOR_UNLOCKED;
+  const char* statusText = rearLoopOpen ? "HEATING" : "IDLE";
+  display.fillRoundRect(250, 420, 300, 30, 5, statusColor);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  int textWidth = strlen(statusText) * 12;
+  display.setCursor(400 - textWidth/2, 425);
+  display.println(statusText);
+}
+
+// ============================================================================
+// HANDLE THERMOSTAT TOUCH
+// ============================================================================
+void handleThermostatTouch() {
+  unsigned long currentMillis = millis();
+
+  uint8_t contacts;
+  GDTpoint_t points[5];
+  contacts = touchDetector.getTouchPoints(points);
+
+  // Detect touch release
+  if (contacts == 0) {
+    if (touchCurrentlyPressed) {
+      touchCurrentlyPressed = false;
+      Serial.println("Touch released");
+    }
+    return;
+  }
+
+  // If screen is off, just wake it and don't process the touch
+  if (!backlightOn) {
+    wakeScreen();
+    lastTouchTime = currentMillis;
+    touchCurrentlyPressed = true;  // Prevent immediate button press
+    return;
+  }
+
+  // Update last user interaction time
+  lastUserInteraction = currentMillis;
+
+  // If touch is still being held down from previous press, ignore
+  if (touchCurrentlyPressed) {
+    return;
+  }
+
+  // Debounce check
+  if (currentMillis - lastTouchTime < TOUCH_DEBOUNCE_MS) {
+    return;
+  }
+
+  if (contacts > 0) {
+    int rawX = points[0].x;
+    int rawY = points[0].y;
+    int x = rawY;
+    int y = 480 - rawX;
+
+    Serial.print("Thermostat touch - X:");
+    Serial.print(x);
+    Serial.print(" Y:");
+    Serial.println(y);
+
+    // Check page navigation buttons first (in header: y 10-50)
+    if (y >= 10 && y <= 50) {
+      if (x >= 395 && x <= 525) {
+        // Locks page button
+        if (currentPage != PAGE_CABINET_LOCKS) {
+          currentPage = PAGE_CABINET_LOCKS;
+          uiNeedsRedraw = true;
+          Serial.println("Switched to Locks page");
+        }
+        lastTouchTime = currentMillis;
+        touchCurrentlyPressed = true;
+        return;
+      } else if (x >= 535 && x <= 665) {
+        // Thermostat page button
+        if (currentPage != PAGE_THERMOSTAT) {
+          currentPage = PAGE_THERMOSTAT;
+          uiNeedsRedraw = true;
+          Serial.println("Switched to Thermostat page");
+        }
+        lastTouchTime = currentMillis;
+        touchCurrentlyPressed = true;
+        return;
+      } else if (x >= 675 && x <= 790) {
+        // Plumbing page button
+        if (currentPage != PAGE_PLUMBING) {
+          currentPage = PAGE_PLUMBING;
+          uiNeedsRedraw = true;
+          Serial.println("Switched to Plumbing page");
+        }
+        lastTouchTime = currentMillis;
+        touchCurrentlyPressed = true;
+        return;
+      }
+    }
+
+    // Temp down button (100, 320, 120, 80)
+    if (x >= 100 && x <= 220 && y >= 320 && y <= 400) {
+      // Check if enough time has passed since last button press
+      if (currentMillis - lastThermostatButtonPress < THERMOSTAT_BUTTON_COOLDOWN) {
+        Serial.println("Ignoring temp down - button cooldown active");
+        lastTouchTime = currentMillis;
+        return;
+      }
+
+      rearThermostatSetpoint -= 1.0;
+      if (rearThermostatSetpoint < 50.0) rearThermostatSetpoint = 50.0;
+      Serial.print("Setpoint decreased to: ");
+      Serial.println(rearThermostatSetpoint);
+      publishThermostatReadings();
+      uiNeedsRedraw = true;
+      lastTouchTime = currentMillis;
+      lastThermostatButtonPress = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Temp up button (580, 320, 120, 80)
+    if (x >= 580 && x <= 700 && y >= 320 && y <= 400) {
+      // Check if enough time has passed since last button press
+      if (currentMillis - lastThermostatButtonPress < THERMOSTAT_BUTTON_COOLDOWN) {
+        Serial.println("Ignoring temp up - button cooldown active");
+        lastTouchTime = currentMillis;
+        return;
+      }
+
+      rearThermostatSetpoint += 1.0;
+      if (rearThermostatSetpoint > 85.0) rearThermostatSetpoint = 85.0;
+      Serial.print("Setpoint increased to: ");
+      Serial.println(rearThermostatSetpoint);
+      publishThermostatReadings();
+      uiNeedsRedraw = true;
+      lastTouchTime = currentMillis;
+      lastThermostatButtonPress = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Mode button (300, 320, 200, 80)
+    if (x >= 300 && x <= 500 && y >= 320 && y <= 400) {
+      // Check if enough time has passed since last button press
+      if (currentMillis - lastThermostatButtonPress < THERMOSTAT_BUTTON_COOLDOWN) {
+        Serial.println("Ignoring mode change - button cooldown active");
+        lastTouchTime = currentMillis;
+        return;
+      }
+
+      if (rearThermostatMode == "AUTO") {
+        rearThermostatMode = "OFF";
+        // Turn off rear loop when switching to OFF
+        controlRearLoop(false);
+      } else {
+        rearThermostatMode = "AUTO";
+      }
+      Serial.print("Mode changed to: ");
+      Serial.println(rearThermostatMode);
+      publishThermostatReadings();
+      uiNeedsRedraw = true;
+      lastTouchTime = currentMillis;
+      lastThermostatButtonPress = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+  }
+}
+
+// ============================================================================
+// SCREEN TIMEOUT MANAGEMENT
+// ============================================================================
+void wakeScreen() {
+  if (!backlightOn) {
+    backlightOn = true;
+    Serial.println("💡 Screen waking up");
+    uiNeedsRedraw = true;  // Redraw screen when waking
+  }
+  lastUserInteraction = millis();  // Reset timeout
+}
+
+void checkScreenTimeout() {
+  if (backlightOn && (millis() - lastUserInteraction >= SCREEN_TIMEOUT_MS)) {
+    backlightOn = false;
+    Serial.println("� Screen timeout - going dark");
+    display.fillScreen(COLOR_BACKGROUND);  // Black screen
+  }
+}// ============================================================================
+// DRAW PAGE NAVIGATION
+// ============================================================================
+void drawPageNav() {
+  // Page navigation buttons in header (top right)
+  // Locks button
+  uint16_t locksColor = (currentPage == PAGE_CABINET_LOCKS) ? COLOR_UNLOCKED : COLOR_UNKNOWN;
+  display.fillRoundRect(395, 10, 130, 40, 5, locksColor);
+  display.drawRoundRect(395, 10, 130, 40, 5, COLOR_BORDER);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(420, 18);
+  display.println("LOCKS");
+
+  // Thermostat button
+  uint16_t thermoColor = (currentPage == PAGE_THERMOSTAT) ? COLOR_UNLOCKED : COLOR_UNKNOWN;
+  display.fillRoundRect(535, 10, 130, 40, 5, thermoColor);
+  display.drawRoundRect(535, 10, 130, 40, 5, COLOR_BORDER);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(548, 18);
+  display.println("THERM");
+
+  // Plumbing button
+  uint16_t plumbColor = (currentPage == PAGE_PLUMBING) ? COLOR_UNLOCKED : COLOR_UNKNOWN;
+  display.fillRoundRect(675, 10, 115, 40, 5, plumbColor);
+  display.drawRoundRect(675, 10, 115, 40, 5, COLOR_BORDER);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(683, 18);
+  display.println("PLUMB");
+}
+
+// ============================================================================
+// DRAW PLUMBING SYSTEM CONTROL PAGE
+// ============================================================================
+void drawPlumbingPage() {
+  display.fillScreen(COLOR_BACKGROUND);
+
+  // Header
+  display.setTextSize(3);
+  display.setTextColor(COLOR_TEXT_WHITE);
+  display.setCursor(250, 15);
+  display.println("PLUMBING SYSTEM");
+
+  // Page navigation
+  drawPageNav();
+
+  // Button layout: 3 rows of 2 buttons each
+  // Row 1: Fresh Water Heater | Grey Water Heater
+  // Row 2: Exhaust Fan | Rear Loop Valve
+  // Row 3: Engine Loop Valve | Diesel Heater
+
+  int buttonWidth = 360;
+  int buttonHeight = 90;
+  int leftX = 30;
+  int rightX = 410;
+  int row1Y = 80;
+  int row2Y = 190;
+  int row3Y = 300;
+
+  // Fresh Water Heater
+  uint16_t freshColor = freshWaterHeaterOn ? COLOR_UNLOCKED : COLOR_LOCKED;
+  display.fillRoundRect(leftX, row1Y, buttonWidth, buttonHeight, 10, freshColor);
+  display.drawRoundRect(leftX, row1Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(leftX + 40, row1Y + 25);
+  display.println("FRESH WATER");
+  display.setCursor(leftX + 80, row1Y + 50);
+  display.println(freshWaterHeaterOn ? "ON" : "OFF");
+
+  // Grey Water Heater
+  uint16_t greyColor = greyWaterHeaterOn ? COLOR_UNLOCKED : COLOR_LOCKED;
+  display.fillRoundRect(rightX, row1Y, buttonWidth, buttonHeight, 10, greyColor);
+  display.drawRoundRect(rightX, row1Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(rightX + 50, row1Y + 25);
+  display.println("GREY WATER");
+  display.setCursor(rightX + 80, row1Y + 50);
+  display.println(greyWaterHeaterOn ? "ON" : "OFF");
+
+  // Exhaust Fan
+  uint16_t fanColor = exhaustFanOn ? COLOR_UNLOCKED : COLOR_LOCKED;
+  display.fillRoundRect(leftX, row2Y, buttonWidth, buttonHeight, 10, fanColor);
+  display.drawRoundRect(leftX, row2Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(leftX + 60, row2Y + 25);
+  display.println("EXHAUST FAN");
+  display.setCursor(leftX + 80, row2Y + 50);
+  display.println(exhaustFanOn ? "ON" : "OFF");
+
+  // Rear Loop Valve
+  uint16_t rearColor = rearLoopValveOpen ? COLOR_UNLOCKED : COLOR_LOCKED;
+  display.fillRoundRect(rightX, row2Y, buttonWidth, buttonHeight, 10, rearColor);
+  display.drawRoundRect(rightX, row2Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(rightX + 45, row2Y + 25);
+  display.println("REAR LOOP");
+  display.setCursor(rightX + 80, row2Y + 50);
+  display.println(rearLoopValveOpen ? "ON" : "OFF");
+
+  // Engine Loop Valve
+  uint16_t engineColor = engineLoopValveOpen ? COLOR_UNLOCKED : COLOR_LOCKED;
+  display.fillRoundRect(leftX, row3Y, buttonWidth, buttonHeight, 10, engineColor);
+  display.drawRoundRect(leftX, row3Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(leftX + 35, row3Y + 25);
+  display.println("ENGINE LOOP");
+  display.setCursor(leftX + 80, row3Y + 50);
+  display.println(engineLoopValveOpen ? "ON" : "OFF");
+
+  // Diesel Heater (cycles through OFF -> MID -> HIGH)
+  uint16_t dieselColor;
+  if (dieselHeaterState == "HIGH") {
+    dieselColor = 0xF800;  // Red for HIGH
+  } else if (dieselHeaterState == "MID") {
+    dieselColor = 0xFFE0;  // Yellow for MID
+  } else {
+    dieselColor = COLOR_UNKNOWN;  // Gray for OFF
+  }
+  display.fillRoundRect(rightX, row3Y, buttonWidth, buttonHeight, 10, dieselColor);
+  display.drawRoundRect(rightX, row3Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(rightX + 25, row3Y + 25);
+  display.println("DIESEL HEATER");
+  display.setTextSize(3);
+  display.setCursor(rightX + 100, row3Y + 50);
+  display.println(dieselHeaterState);
+
+  // Footer info
+  display.setTextSize(1);
+  display.setTextColor(COLOR_TEXT_WHITE);
+  display.setCursor(10, 410);
+  display.println("Tap relay buttons to toggle ON/OFF");
+  display.setCursor(10, 425);
+  display.println("Diesel Heater cycles: OFF -> MID -> HIGH -> OFF");
+
+  // Connection status
+  display.setCursor(10, 460);
+  display.print("IP: ");
+  display.print(gigaIP);
+  display.print(" | MQTT: ");
+  display.print(mqttClient.connected() ? "Connected" : "Disconnected");
+  display.print(" | FW: ");
+  display.print(FIRMWARE_VERSION);
+}
+
+// ============================================================================
+// HANDLE PLUMBING PAGE TOUCH
+// ============================================================================
+void handlePlumbingTouch() {
+  unsigned long currentMillis = millis();
+
+  // Debounce: ignore if touched within debounce period
+  if (currentMillis - lastTouchTime < TOUCH_DEBOUNCE_MS) {
+    return;
+  }
+
+  // Get touch points
+  uint8_t contacts;
+  GDTpoint_t points[5];
+  contacts = touchDetector.getTouchPoints(points);
+
+  if (contacts > 0) {
+    // If touch is still held from previous detection, ignore
+    if (touchCurrentlyPressed) {
+      return;
+    }
+
+    // Wake screen if sleeping
+    if (!backlightOn) {
+      wakeScreen();
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Update last user interaction time
+    lastUserInteraction = currentMillis;
+
+    // Transform coordinates for landscape mode
+    int rawX = points[0].x;
+    int rawY = points[0].y;
+    int x = rawY;
+    int y = 480 - rawX;
+
+    Serial.print("Plumbing Touch - Raw: X:");
+    Serial.print(rawX);
+    Serial.print(" Y:");
+    Serial.print(rawY);
+    Serial.print(" | Transformed: X:");
+    Serial.print(x);
+    Serial.print(" Y:");
+    Serial.println(y);
+
+    // Check page navigation buttons (y 10-50)
+    if (y >= 10 && y <= 50) {
+      if (x >= 395 && x <= 525) {
+        // Locks page
+        currentPage = PAGE_CABINET_LOCKS;
+        uiNeedsRedraw = true;
+        Serial.println("Switched to Locks page");
+        lastTouchTime = currentMillis;
+        touchCurrentlyPressed = true;
+        return;
+      } else if (x >= 535 && x <= 665) {
+        // Thermostat page
+        currentPage = PAGE_THERMOSTAT;
+        uiNeedsRedraw = true;
+        Serial.println("Switched to Thermostat page");
+        lastTouchTime = currentMillis;
+        touchCurrentlyPressed = true;
+        return;
+      } else if (x >= 675 && x <= 790) {
+        // Already on plumbing page
+        lastTouchTime = currentMillis;
+        touchCurrentlyPressed = true;
+        return;
+      }
+    }
+
+    int buttonWidth = 360;
+    int buttonHeight = 90;
+    int leftX = 30;
+    int rightX = 410;
+    int row1Y = 80;
+    int row2Y = 190;
+    int row3Y = 300;
+
+    // Check Fresh Water Heater button
+    if (x >= leftX && x <= (leftX + buttonWidth) && y >= row1Y && y <= (row1Y + buttonHeight)) {
+      sendPlumbingCommand(topic_fresh_water_heat_cmd, freshWaterHeaterOn ? "OFF" : "ON");
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Check Grey Water Heater button
+    if (x >= rightX && x <= (rightX + buttonWidth) && y >= row1Y && y <= (row1Y + buttonHeight)) {
+      sendPlumbingCommand(topic_grey_water_heat_cmd, greyWaterHeaterOn ? "OFF" : "ON");
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Check Exhaust Fan button
+    if (x >= leftX && x <= (leftX + buttonWidth) && y >= row2Y && y <= (row2Y + buttonHeight)) {
+      sendPlumbingCommand(topic_exhaust_fan_cmd, exhaustFanOn ? "OFF" : "ON");
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Check Rear Loop Valve button
+    if (x >= rightX && x <= (rightX + buttonWidth) && y >= row2Y && y <= (row2Y + buttonHeight)) {
+      sendPlumbingCommand(topic_rear_loop_cmd, rearLoopValveOpen ? "CLOSE" : "OPEN");
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Check Engine Loop Valve button
+    if (x >= leftX && x <= (leftX + buttonWidth) && y >= row3Y && y <= (row3Y + buttonHeight)) {
+      sendPlumbingCommand(topic_engine_loop_cmd, engineLoopValveOpen ? "CLOSE" : "OPEN");
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Check Diesel Heater button (cycles through states)
+    if (x >= rightX && x <= (rightX + buttonWidth) && y >= row3Y && y <= (row3Y + buttonHeight)) {
+      String nextState;
+      if (dieselHeaterState == "OFF") {
+        nextState = "MID";
+      } else if (dieselHeaterState == "MID") {
+        nextState = "HIGH";
+      } else {
+        nextState = "OFF";
+      }
+      sendPlumbingCommand(topic_diesel_heater_cmd, nextState.c_str());
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+  } else {
+    // No touch detected - reset the flag
+    touchCurrentlyPressed = false;
+  }
+}
+
+// ============================================================================
+// SEND PLUMBING COMMAND
+// ============================================================================
+void sendPlumbingCommand(const char* topic, const char* command) {
+  if (!mqttClient.connected()) {
+    Serial.println("Cannot send plumbing command - MQTT not connected");
+    return;
+  }
+
+  Serial.print("Sending plumbing command to ");
+  Serial.print(topic);
+  Serial.print(": ");
+  Serial.println(command);
+
+  mqttClient.publish(topic, command);
+}
+
+// ============================================================================
+// UPDATE HANDLE TOUCH TO INCLUDE PAGE NAVIGATION
+// ============================================================================
