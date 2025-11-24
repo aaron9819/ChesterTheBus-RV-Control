@@ -341,6 +341,7 @@ void setupOTA();
 void reconnectMQTT();
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void subscribeToTopics();
+void publishHomeAssistantDiscovery();
 
 // Temperature Sensors
 void readTemperatures();
@@ -785,6 +786,101 @@ void setupOTA() {
 }
 
 // ============================================================================
+// HOME ASSISTANT MQTT DISCOVERY
+// ============================================================================
+void publishHomeAssistantDiscovery() {
+  Serial.println("📡 Publishing Home Assistant MQTT Discovery...");
+  
+  String deviceId = "chester_plumbing";
+  String deviceName = "Chester Plumbing System";
+  
+  // Device configuration (shared by all entities)
+  String device = "{\"identifiers\":[\"" + deviceId + "\"],"
+                  "\"name\":\"" + deviceName + "\","
+                  "\"model\":\"ESP32-S2 Mini\","
+                  "\"manufacturer\":\"ChesterTheBus\","
+                  "\"sw_version\":\"" + String(FIRMWARE_VERSION) + "\"}";
+  
+  // Helper lambda for publishing discovery
+  auto publishDiscovery = [&](const char* component, const char* objectId, const char* name, 
+                              const char* stateTopic, const char* deviceClass = nullptr, 
+                              const char* unit = nullptr, const char* commandTopic = nullptr,
+                              const char* payloadOn = nullptr, const char* payloadOff = nullptr,
+                              const char* icon = nullptr) {
+    String topic = String("homeassistant/") + component + "/" + deviceId + "/" + objectId + "/config";
+    String payload = "{\"name\":\"" + String(name) + "\","
+                     "\"unique_id\":\"" + deviceId + "_" + objectId + "\","
+                     "\"state_topic\":\"" + String(stateTopic) + "\"";
+    
+    if (deviceClass) payload += ",\"device_class\":\"" + String(deviceClass) + "\"";
+    if (unit) payload += ",\"unit_of_measurement\":\"" + String(unit) + "\"";
+    if (commandTopic) payload += ",\"command_topic\":\"" + String(commandTopic) + "\"";
+    if (payloadOn) payload += ",\"payload_on\":\"" + String(payloadOn) + "\"";
+    if (payloadOff) payload += ",\"payload_off\":\"" + String(payloadOff) + "\"";
+    if (icon) payload += ",\"icon\":\"" + String(icon) + "\"";
+    
+    payload += ",\"device\":" + device + "}";
+    
+    client.publish(topic.c_str(), payload.c_str(), true);
+    delay(50); // Small delay between discoveries
+  };
+  
+  // Temperature Sensors
+  publishDiscovery("sensor", "hydronic_temp", "Hydronic Temperature", Topic_Hydronic_Temp, "temperature", "°C", nullptr, nullptr, nullptr, "mdi:water-boiler");
+  publishDiscovery("sensor", "fresh_water_temp", "Fresh Water Tank Temperature", Topic_FreshWtr_Temp, "temperature", "°C");
+  publishDiscovery("sensor", "grey_water_temp", "Grey Water Tank Temperature", Topic_GreyWtr_Temp, "temperature", "°C");
+  publishDiscovery("sensor", "return_manifold_temp", "Return Manifold Temperature", Topic_Temp_Return, "temperature", "°C");
+  publishDiscovery("sensor", "ambient_temp", "Ambient Temperature", Topic_Environment_Temp, "temperature", "°C");
+  
+  // Environmental Sensors
+  publishDiscovery("sensor", "humidity", "Humidity", Topic_Environment_Humidity, "humidity", "%");
+  publishDiscovery("sensor", "pressure", "Atmospheric Pressure", Topic_Environment_Pressure, "pressure", "hPa");
+  
+  // Pump Sensors
+  publishDiscovery("sensor", "pump_pressure", "Hot Water Pump Pressure", Topic_Pump_Pressure, "pressure", "PSI", nullptr, nullptr, nullptr, "mdi:gauge");
+  publishDiscovery("sensor", "pump_speed", "Hot Water Pump Speed", Topic_Pump_Speed, nullptr, "%", nullptr, nullptr, nullptr, "mdi:pump");
+  publishDiscovery("sensor", "pump_status", "Hot Water Pump Status", Topic_Pump_Status, nullptr, nullptr, nullptr, nullptr, nullptr, "mdi:pump");
+  
+  // Flow Sensor
+  publishDiscovery("sensor", "flow_rate", "Hot Water Flow Rate", Topic_Flow_Rate, nullptr, "L/min", nullptr, nullptr, nullptr, "mdi:water");
+  publishDiscovery("sensor", "flow_status", "Hot Water Flow Status", Topic_Flow_Status, nullptr, nullptr, nullptr, nullptr, nullptr, "mdi:water");
+  
+  // Switches (Valves and Controls)
+  publishDiscovery("switch", "fresh_water_heat", "Fresh Water Tank Heater", Topic_FreshWtrHeat_Status, nullptr, nullptr, Topic_FreshWtrHeat_Command, "ON", "OFF", "mdi:water-thermometer");
+  publishDiscovery("switch", "grey_water_heat", "Grey Water Tank Heater", Topic_GreyWtrHeat_Status, nullptr, nullptr, Topic_GreyWtrHeat_Command, "ON", "OFF", "mdi:water-thermometer");
+  publishDiscovery("switch", "rear_loop", "Rear Loop Valve", Topic_RearLoop_Status, nullptr, nullptr, Topic_RearLoop_Command, "OPEN", "CLOSE", "mdi:pipe-valve");
+  publishDiscovery("switch", "engine_loop", "Engine Loop Valve", Topic_EngineLoop_Status, nullptr, nullptr, Topic_EngineLoop_Command, "OPEN", "CLOSE", "mdi:pipe-valve");
+  publishDiscovery("switch", "front_loop", "Front Loop Valve", Topic_FrontLoop_Status, nullptr, nullptr, Topic_FrontLoop_Command, "OPEN", "CLOSE", "mdi:pipe-valve");
+  publishDiscovery("switch", "exhaust_fan", "Exhaust Fan", Topic_ExhaustFan_Status, nullptr, nullptr, Topic_ExhaustFan_Command, "ON", "OFF", "mdi:fan");
+  publishDiscovery("switch", "main_pump", "Main Water Pump", Topic_MainPump_Status, nullptr, nullptr, Topic_MainPump_Command, "ON", "OFF", "mdi:pump");
+  publishDiscovery("switch", "domestic_hw", "Domestic Hot Water", Topic_DomesticHW_Status, nullptr, nullptr, Topic_DomesticHW_Command, "OPEN", "CLOSE", "mdi:water-boiler");
+  
+  // Diesel Heater (select entity for 3-state control)
+  String heaterTopic = String("homeassistant/select/") + deviceId + "/diesel_heater/config";
+  String heaterPayload = "{\"name\":\"Diesel Heater\","
+                         "\"unique_id\":\"" + deviceId + "_diesel_heater\","
+                         "\"state_topic\":\"" + String(Topic_DieselHtr_Status) + "\","
+                         "\"command_topic\":\"" + String(Topic_DieselHtr_Command) + "\","
+                         "\"options\":[\"OFF\",\"PUMP ONLY\",\"HIGH\"],"
+                         "\"icon\":\"mdi:fire\","
+                         "\"device\":" + device + "}";
+  client.publish(heaterTopic.c_str(), heaterPayload.c_str(), true);
+  delay(50);
+  
+  // Binary Sensors (Alerts)
+  publishDiscovery("binary_sensor", "freeze_warning", "Freeze Warning", Topic_Alert_Freeze_Warning, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:snowflake-alert");
+  publishDiscovery("binary_sensor", "high_temp_alert", "High Temperature Alert", Topic_Alert_High_Temp, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:thermometer-alert");
+  publishDiscovery("binary_sensor", "system_error", "System Error", Topic_Alert_System_Error, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:alert-circle");
+  publishDiscovery("binary_sensor", "pump_error", "Pump Error", Topic_Alert_Pump_Error, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:pump-off");
+  publishDiscovery("binary_sensor", "high_humidity_alert", "High Humidity Alert (Leak Detection)", Topic_Alert_High_Humidity, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:water-alert");
+  
+  // Cabinet Lock
+  publishDiscovery("lock", "cabinet_lock", "Rear Pass Cabinet Lock", Topic_CabLock_Status, nullptr, nullptr, Topic_CabLock_Command, "LOCK", "UNLOCK", "mdi:lock");
+  
+  Serial.println("✓ Home Assistant Discovery published for Plumbing System");
+}
+
+// ============================================================================
 // MQTT CONNECTION
 // ============================================================================
 void reconnectMQTT() {
@@ -818,6 +914,7 @@ void reconnectMQTT() {
   if (client.connect(mqtt_client_id, mqtt_user, mqtt_password)) {
     Serial.println(" connected!");
     mqttFailCount = 0;
+    publishHomeAssistantDiscovery();
     subscribeToTopics();
     publishHealth();
     publishStatus();

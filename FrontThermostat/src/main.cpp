@@ -186,6 +186,7 @@ const unsigned long COMMAND_COOLDOWN_MS = 1000; // Ignore duplicate commands wit
 // Forward declarations
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void reconnectMQTT();
+void publishHomeAssistantDiscovery();
 void lockCabinet();
 void unlockCabinet();
 void sendStatus();
@@ -276,6 +277,85 @@ void processCommand(String command) {
   }
 }
 
+// ============================================================================
+// HOME ASSISTANT MQTT DISCOVERY
+// ============================================================================
+void publishHomeAssistantDiscovery() {
+  Serial.println("📡 Publishing Home Assistant MQTT Discovery...");
+  
+  String deviceId = "chester_thermostat";
+  String deviceName = "Chester Front Thermostat";
+  
+  // Device configuration
+  String device = "{\"identifiers\":[\"" + deviceId + "\"],"
+                  "\"name\":\"" + deviceName + "\","
+                  "\"model\":\"ESP32-S2 Mini\","
+                  "\"manufacturer\":\"ChesterTheBus\","
+                  "\"sw_version\":\"" + String(FIRMWARE_VERSION) + "\"}";
+  
+  // Helper lambda
+  auto publishDiscovery = [&](const char* component, const char* objectId, const char* name, 
+                              const char* stateTopic, const char* deviceClass = nullptr, 
+                              const char* unit = nullptr, const char* commandTopic = nullptr,
+                              const char* payloadOn = nullptr, const char* payloadOff = nullptr,
+                              const char* icon = nullptr, const char* min = nullptr, const char* max = nullptr) {
+    String topic = String("homeassistant/") + component + "/" + deviceId + "/" + objectId + "/config";
+    String payload = "{\"name\":\"" + String(name) + "\","
+                     "\"unique_id\":\"" + deviceId + "_" + objectId + "\","
+                     "\"state_topic\":\"" + String(stateTopic) + "\"";
+    
+    if (deviceClass) payload += ",\"device_class\":\"" + String(deviceClass) + "\"";
+    if (unit) payload += ",\"unit_of_measurement\":\"" + String(unit) + "\"";
+    if (commandTopic) payload += ",\"command_topic\":\"" + String(commandTopic) + "\"";
+    if (payloadOn) payload += ",\"payload_on\":\"" + String(payloadOn) + "\"";
+    if (payloadOff) payload += ",\"payload_off\":\"" + String(payloadOff) + "\"";
+    if (icon) payload += ",\"icon\":\"" + String(icon) + "\"";
+    if (min) payload += ",\"min\":" + String(min);
+    if (max) payload += ",\"max\":" + String(max);
+    
+    payload += ",\"device\":" + device + "}";
+    
+    mqttClient.publish(topic.c_str(), payload.c_str(), true);
+    delay(50);
+  };
+  
+  // Temperature Sensors
+  publishDiscovery("sensor", "temp_f", "Temperature", topic_thermostat_tempF.c_str(), "temperature", "°F", nullptr, nullptr, nullptr, "mdi:thermometer");
+  publishDiscovery("sensor", "temp_c", "Temperature (Celsius)", topic_thermostat_temp.c_str(), "temperature", "°C");
+  
+  // Climate Entity (Thermostat)
+  String climateTopic = String("homeassistant/climate/") + deviceId + "/thermostat/config";
+  String climatePayload = "{\"name\":\"Thermostat\","
+                          "\"unique_id\":\"" + deviceId + "_climate\","
+                          "\"current_temperature_topic\":\"" + topic_thermostat_tempF + "\","
+                          "\"temperature_command_topic\":\"" + topic_thermostat_setTempF_cmd + "\","
+                          "\"temperature_state_topic\":\"" + topic_thermostat_setTempF + "\","
+                          "\"mode_state_topic\":\"ThermostatMode\","
+                          "\"mode_command_topic\":\"ThermostatModeCommand\","
+                          "\"modes\":[\"off\",\"heat\"],"
+                          "\"min_temp\":50,"
+                          "\"max_temp\":86,"
+                          "\"temp_step\":0.5,"
+                          "\"temperature_unit\":\"F\","
+                          "\"icon\":\"mdi:thermostat\","
+                          "\"device\":" + device + "}";
+  mqttClient.publish(climateTopic.c_str(), climatePayload.c_str(), true);
+  delay(50);
+  
+  // Binary Sensors
+  publishDiscovery("binary_sensor", "heating", "Heating Status", topic_thermostat_heating.c_str(), nullptr, nullptr, nullptr, "ON", "OFF", "mdi:fire");
+  
+  // Sensors
+  publishDiscovery("sensor", "fan_speed", "Fan Speed", topic_fan_speed.c_str(), nullptr, "PWM", nullptr, nullptr, nullptr, "mdi:fan");
+  
+  // Cabinet Lock
+  String lockName = String("Cabinet Lock (") + String(CABINET_ID) + ")";
+  publishDiscovery("lock", "cabinet_lock", lockName.c_str(), topic_cabinetLock_status.c_str(), nullptr, nullptr, 
+                   topic_cabinetLock_command.c_str(), "LOCK", "UNLOCK", "mdi:lock");
+  
+  Serial.println("✓ Home Assistant Discovery published for Thermostat");
+}
+
 void reconnectMQTT() {
   // Loop until we're reconnected
   while (!mqttClient.connected()) {
@@ -297,6 +377,9 @@ void reconnectMQTT() {
 
     if (connected) {
       Serial.println("connected");
+
+      // Publish Home Assistant discovery
+      publishHomeAssistantDiscovery();
 
       // Subscribe to individual command topic
       mqttClient.subscribe(topic_cabinetLock_command.c_str());

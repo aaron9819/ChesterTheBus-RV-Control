@@ -52,6 +52,7 @@ const unsigned long STATUS_INTERVAL = 60000; // Send status every 60 seconds
 // Forward declarations
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void reconnectMQTT();
+void publishHomeAssistantDiscovery();
 void lockCabinet();
 void unlockCabinet();
 void sendStatus();
@@ -94,6 +95,41 @@ void processCommand(String command) {
   }
 }
 
+// ============================================================================
+// HOME ASSISTANT MQTT DISCOVERY
+// ============================================================================
+void publishHomeAssistantDiscovery() {
+  Serial.println("📡 Publishing Home Assistant MQTT Discovery...");
+  
+  String deviceId = String("chester_cablock_") + String(CABINET_ID);
+  deviceId.toLowerCase();
+  String deviceName = String("Cabinet Lock - ") + String(CABINET_ID);
+  
+  // Device configuration
+  String device = "{\"identifiers\":[\"" + deviceId + "\"],"
+                  "\"name\":\"" + deviceName + "\","
+                  "\"model\":\"D1 Mini (ESP8266)\","
+                  "\"manufacturer\":\"ChesterTheBus\"}";
+  
+  // Lock Entity
+  String topic = String("homeassistant/lock/") + deviceId + "/lock/config";
+  String payload = "{\"name\":\"" + deviceName + "\","
+                   "\"unique_id\":\"" + deviceId + "_lock\","
+                   "\"state_topic\":\"" + topic_cabinetLock_status + "\","
+                   "\"command_topic\":\"" + topic_cabinetLock_command + "\","
+                   "\"payload_lock\":\"LOCK\","
+                   "\"payload_unlock\":\"UNLOCK\","
+                   "\"state_locked\":\"LOCKED\","
+                   "\"state_unlocked\":\"UNLOCKED\","
+                   "\"optimistic\":false,"
+                   "\"icon\":\"mdi:lock\","
+                   "\"device\":" + device + "}";
+  
+  mqttClient.publish(topic.c_str(), payload.c_str(), true);
+  
+  Serial.println("✓ Home Assistant Discovery published");
+}
+
 void reconnectMQTT() {
   // Loop until we're reconnected
   while (!mqttClient.connected()) {
@@ -115,6 +151,9 @@ void reconnectMQTT() {
 
     if (connected) {
       Serial.println("connected");
+
+      // Publish Home Assistant discovery
+      publishHomeAssistantDiscovery();
 
       // Subscribe to individual command topic
       mqttClient.subscribe(topic_cabinetLock_command.c_str());
