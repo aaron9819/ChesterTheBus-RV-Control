@@ -37,26 +37,33 @@ String topic_cabinetLock_command = "CabLock" + String(CABINET_ID) + "Command";
 String topic_cabinetLock_status = "CabLock" + String(CABINET_ID) + "Status";
 const char* topic_allLock_command = "CabLockAllCommand";  // Group control
 
-// Front Loop Topics
-String topic_frontLoop_command = "FrontLoopCommand";
-String topic_frontLoop_status = "FrontLoopStatus";
-
 // Thermostat Topics
-String topic_thermostat_temp = "ThermostatTemp";
-String topic_thermostat_setTemp = "ThermostatSetTemp";
+String topic_thermostat_temp = "ThermostatTemp";           // Current temp in Celsius
+String topic_thermostat_tempF = "ThermostatTempF";         // Current temp in Fahrenheit
+String topic_thermostat_setTemp = "ThermostatSetTemp";     // Set temp in Celsius
+String topic_thermostat_setTempF = "ThermostatSetTempF";   // Set temp in Fahrenheit
+String topic_thermostat_setTempF_cmd = "ThermostatSetTempFCommand";  // Command to set temp in Fahrenheit
 String topic_thermostat_heating = "ThermostatHeating";
 String topic_engine_loop_status = "EngineLoopStatus";
 String topic_fan_speed = "FanSpeed";
 
+// Loop Control Topics (MQTT commands to plumbing board)
+const char* topic_front_loop_command = "FrontLoopCommand";
+const char* topic_engine_loop_command = "EngineLoopCommand";
+
+// Diesel Heater Topics
+const char* topic_diesel_heater_command = "DieselHeaterCommand";
+const char* topic_diesel_heater_status = "DieselHeaterStatus";
+
 // Hardware Configuration - ESP32-S2 Mini GPIO pins
-#define SERVO_PIN 8          // GPIO8 for servo control
-#define FRONT_LOOP_PIN 4     // GPIO4 -> Hardware trigger to plumbing board GPIO14
-#define ENGINE_LOOP_PIN 2    // GPIO2 -> Hardware trigger to plumbing board GPIO13
-#define FAN_PWM_PIN 16       // GPIO16 for PWM fan control
-#define TEMP_UP_BUTTON 21    // GPIO21 for temperature up button
-#define TEMP_DOWN_BUTTON 17  // GPIO17 for temperature down button
-#define BME280_SDA 33        // GPIO33 for I2C SDA
-#define BME280_SCL 35        // GPIO35 for I2C SCL
+#define SERVO_PIN 8          // for servo control
+// #define FRONT_LOOP_PIN 1     // -> Hardware trigger to plumbing board GPIO14 (DISABLED - using MQTT)
+// #define ENGINE_LOOP_PIN 2    // -> Hardware trigger to plumbing board GPIO13 (DISABLED - using MQTT)
+#define FAN_PWM_PIN 10       // for PWM fan control
+#define TEMP_UP_BUTTON 21    // for temperature up button
+#define TEMP_DOWN_BUTTON 17  // for temperature down button
+#define BME280_SDA 33        // for I2C SDA
+#define BME280_SCL 35        // for I2C SCL
 
 // PWM Configuration for Fan
 #define PWM_FREQ 25000       // 25kHz PWM frequency (standard for fans)
@@ -79,15 +86,33 @@ bool displayConnected = false;
 // Front Loop State
 bool frontLoopValveOpen = false;
 
+// Diesel Heater State
+String dieselHeaterStatus = "UNKNOWN";  // Tracks current heater status from plumbing board
+
 // Thermostat State
 float currentTemp = 0.0;
 float currentHumidity = 0.0;
 float setTemp = 21.0;  // Default 21°C
-const float TEMP_CALIBRATION_OFFSET = -4.0;  // Temperature offset in °C (adjust as needed)
+const float TEMP_CALIBRATION_OFFSET = -6.0;  // Temperature offset in °C (adjust as needed)
+
+// Heat Mode: OFF, AUTO
+enum HeatMode {
+  HEAT_OFF,    // Completely off, no heating
+  HEAT_AUTO    // Automatic temperature control
+};
+HeatMode heatMode = HEAT_AUTO;  // Default to AUTO
+
 bool heatingActive = false;
 bool engineLoopOpen = false;
 bool fanRunning = false;
 int fanSpeed = 0;  // 0-255 PWM value
+
+// Two-stage heating logic
+unsigned long heatingStartTime = 0;        // When heating first started
+unsigned long engineLoopOpenTime = 0;      // When engine loop was opened
+const unsigned long STAGE2_DELAY = 1200000;  // 20 minutes in milliseconds
+const unsigned long FAN_DELAY = 630000;      // >10 minutes delay for fan after engine loop opens
+const float STAGE2_ERROR_THRESHOLD = 1.0;  // °C error to trigger stage 2 immediately
 
 // PI Controller State
 float integralError = 0.0;      // Accumulated error for integral term
@@ -106,14 +131,33 @@ const float RATE_LIMIT = 10.0;  // Max change: 10%/second
 // Timing for valve control
 unsigned long valveOpenTime = 0;
 
-// Button debouncing
-unsigned long lastButtonPress = 0;
-const unsigned long BUTTON_DEBOUNCE_MS = 200;
+// Button state tracking with debouncing
+struct ButtonState {
+  bool currentlyPressed;
+  bool wasPressed;
+  unsigned long pressStartTime;
+  unsigned long lastChangeTime;
+  bool longPressTriggered;
+};
+
+ButtonState btnUp = {false, false, 0, 0, false};
+ButtonState btnDown = {false, false, 0, 0, false};
+
+const unsigned long BUTTON_DEBOUNCE_MS = 50;   // Debounce time
+const unsigned long LONG_PRESS_MS = 1000;       // 1 second for long press
+const unsigned long REPEAT_RATE_MS = 200;       // Repeat rate for held buttons
 
 // Display state management
-bool showingSetTemp = false;
-unsigned long setTempDisplayTime = 0;
+enum DisplayMode {
+  DISPLAY_CURRENT_TEMP,
+  DISPLAY_SET_TEMP,
+  DISPLAY_MODE_CHANGE
+};
+DisplayMode displayMode = DISPLAY_CURRENT_TEMP;
+unsigned long displayModeChangeTime = 0;
+const unsigned long MODE_DISPLAY_DURATION = 2000;  // Show mode for 2 seconds
 const unsigned long SET_TEMP_DISPLAY_DURATION = 3000;  // Show set temp for 3 seconds
+String displayMessage = "";
 
 // Lock positions (adjust based on your servo/latch mechanism)
 #define LOCKED_POSITION 90
@@ -146,7 +190,6 @@ void lockCabinet();
 void unlockCabinet();
 void sendStatus();
 void processCommand(String command);
-void controlFrontLoop(bool turnOn);
 void readTemperature();
 void updateThermostat();
 void controlEngineLoop(bool open);
@@ -168,17 +211,32 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   message.trim();
 
-  // Handle front loop commands
-  if (String(topic) == topic_frontLoop_command) {
-    if (message == "ON") {
-      controlFrontLoop(true);
-    } else if (message == "OFF") {
-      controlFrontLoop(false);
+  // Handle cabinet lock commands
+  if (String(topic) == topic_cabinetLock_command || String(topic) == topic_allLock_command) {
+    processCommand(message);
+  }
+  // Handle temperature set command in Fahrenheit
+  else if (String(topic) == topic_thermostat_setTempF_cmd) {
+    float tempF = message.toFloat();
+    if (tempF >= 50.0 && tempF <= 86.0) {  // Valid range 50-86°F (10-30°C)
+      setTemp = (tempF - 32.0) * 5.0 / 9.0;  // Convert F to C
+      Serial.print("🌡️ Set temperature changed via MQTT to: ");
+      Serial.print(tempF, 1);
+      Serial.print("°F (");
+      Serial.print(setTemp, 1);
+      Serial.println("°C)");
+      publishThermostatStatus();
+    } else {
+      Serial.print("⚠️ Invalid temperature: ");
+      Serial.print(tempF, 1);
+      Serial.println("°F (must be 50-86°F)");
     }
   }
-  // Handle cabinet lock commands
-  else if (String(topic) == topic_cabinetLock_command || String(topic) == topic_allLock_command) {
-    processCommand(message);
+  // Handle diesel heater status updates
+  else if (String(topic) == topic_diesel_heater_status) {
+    dieselHeaterStatus = message;
+    Serial.print("🔥 Diesel heater status: ");
+    Serial.println(dieselHeaterStatus);
   }
 }
 
@@ -250,10 +308,15 @@ void reconnectMQTT() {
       Serial.print("Subscribed to: ");
       Serial.println(topic_allLock_command);
 
-      // Subscribe to front loop command topic
-      mqttClient.subscribe(topic_frontLoop_command.c_str());
+      // Subscribe to temperature set command (Fahrenheit)
+      mqttClient.subscribe(topic_thermostat_setTempF_cmd.c_str());
       Serial.print("Subscribed to: ");
-      Serial.println(topic_frontLoop_command);
+      Serial.println(topic_thermostat_setTempF_cmd);
+
+      // Subscribe to diesel heater status
+      mqttClient.subscribe(topic_diesel_heater_status);
+      Serial.print("Subscribed to: ");
+      Serial.println(topic_diesel_heater_status);
 
       // Send initial status
       sendStatus();
@@ -290,28 +353,16 @@ void setup() {
   Serial.println("Servo initialized at UNLOCKED position");
 
   // Initialize hardware trigger pins (outputs to plumbing board)
-  // These pins connect to plumbing board GPIO13 and GPIO14
-  // HIGH = no trigger (inactive), LOW = trigger active
-  pinMode(FRONT_LOOP_PIN, OUTPUT);
-  digitalWrite(FRONT_LOOP_PIN, HIGH);  // Start HIGH (inactive)
+  // DISABLED - Now using MQTT commands instead of hardware triggers
+  // pinMode(FRONT_LOOP_PIN, OUTPUT);
+  // digitalWrite(FRONT_LOOP_PIN, HIGH);  // Start HIGH (inactive)
   frontLoopValveOpen = false;
-  Serial.println("Front loop trigger pin initialized (HIGH/inactive)");
+  Serial.println("Front loop control: MQTT mode (hardware triggers disabled)");
 
-  pinMode(ENGINE_LOOP_PIN, OUTPUT);
-  digitalWrite(ENGINE_LOOP_PIN, HIGH);  // Start HIGH (inactive)
+  // pinMode(ENGINE_LOOP_PIN, OUTPUT);
+  // digitalWrite(ENGINE_LOOP_PIN, HIGH);  // Start HIGH (inactive)
   engineLoopOpen = false;
-  Serial.println("Engine loop trigger pin initialized (HIGH/inactive)");
-
-  // Initialize PWM fan control
-  ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
-  ledcAttachPin(FAN_PWM_PIN, PWM_CHANNEL);
-  ledcWrite(PWM_CHANNEL, 0);  // Start at 0% (off)
-  fanSpeed = 0;
-  Serial.print("Fan PWM initialized on GPIO");
-  Serial.print(FAN_PWM_PIN);
-  Serial.print(" at ");
-  Serial.print(PWM_FREQ);
-  Serial.println(" Hz (OFF)");
+  Serial.println("Engine loop control: MQTT mode (hardware triggers disabled)");
 
   // Initialize button pins with internal pullup
   pinMode(TEMP_UP_BUTTON, INPUT_PULLUP);
@@ -330,6 +381,17 @@ void setup() {
     bmeConnected = false;
     Serial.println("WARNING: BME280 sensor not found!");
   }
+
+  // Initialize PWM fan control
+  ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(FAN_PWM_PIN, PWM_CHANNEL);
+  ledcWrite(PWM_CHANNEL, 0);  // Start at 0% (off)
+  fanSpeed = 0;
+  Serial.print("Fan PWM initialized on GPIO");
+  Serial.print(FAN_PWM_PIN);
+  Serial.print(" at ");
+  Serial.print(PWM_FREQ);
+  Serial.println(" Hz (OFF)");
 
   // Initialize OLED display (D1 Mini Shield - address 0x3C or 0x3D)
   if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -492,19 +554,6 @@ void unlockCabinet() {
   }
 }
 
-void controlFrontLoop(bool turnOn) {
-  digitalWrite(FRONT_LOOP_PIN, turnOn ? LOW : HIGH); // Active LOW relay
-  frontLoopValveOpen = turnOn;
-
-  Serial.print("💧 Front Loop Valve: ");
-  Serial.println(turnOn ? "OPEN" : "CLOSED");
-
-  if (mqttClient.connected()) {
-    mqttClient.publish(topic_frontLoop_status.c_str(), turnOn ? "ON" : "OFF", true);
-    Serial.println("Front loop status published");
-  }
-}
-
 void sendStatus() {
   // Publish current status via MQTT (with retained flag for Home Assistant)
   if (mqttClient.connected()) {
@@ -522,11 +571,6 @@ void sendStatus() {
     Serial.print(CABINET_ID);
     Serial.print(": ");
     Serial.println(lockStatus);
-
-    // Front loop status
-    mqttClient.publish(topic_frontLoop_status.c_str(), frontLoopValveOpen ? "ON" : "OFF", true);
-    Serial.print("Front loop status: ");
-    Serial.println(frontLoopValveOpen ? "ON" : "OFF");
   }
 }
 
@@ -538,11 +582,18 @@ void readTemperature() {
     currentTemp = bme.readTemperature() + TEMP_CALIBRATION_OFFSET;
     currentHumidity = bme.readHumidity();
 
-    // Publish temperature to MQTT
+    // Publish temperature to MQTT (both Celsius and Fahrenheit)
     if (mqttClient.connected()) {
+      // Celsius
       char tempStr[8];
       dtostrf(currentTemp, 5, 1, tempStr);
       mqttClient.publish(topic_thermostat_temp.c_str(), tempStr, false);
+
+      // Fahrenheit
+      float currentTempF = (currentTemp * 9.0 / 5.0) + 32.0;
+      char tempStrF[8];
+      dtostrf(currentTempF, 5, 1, tempStrF);
+      mqttClient.publish(topic_thermostat_tempF.c_str(), tempStrF, false);
     }
   }
 }
@@ -552,34 +603,114 @@ void readTemperature() {
 // ============================================================================
 void updateThermostat() {
   if (!bmeConnected) return;
+  if (heatMode == HEAT_OFF) {
+    // Heat is OFF - ensure everything is disabled
+    if (heatingActive || engineLoopOpen || frontLoopValveOpen || fanRunning) {
+      heatingActive = false;
+      engineLoopOpen = false;
+      frontLoopValveOpen = false;
+      // digitalWrite(ENGINE_LOOP_PIN, HIGH);  // Hardware trigger disabled
+      // digitalWrite(FRONT_LOOP_PIN, HIGH);   // Hardware trigger disabled
+      if (mqttClient.connected()) {
+        mqttClient.publish(topic_engine_loop_command, "CLOSE", false);
+        mqttClient.publish(topic_front_loop_command, "CLOSE", false);
+      }
+      controlFan(0);
+      integralError = 0;
+      lastControlOutput = 0;
+      Serial.println("🚫 Heat mode OFF - loops and fan disabled (diesel heater unchanged)");
+    }
+    return;
+  }
 
   unsigned long currentTime = millis();
   float deltaTime = (lastControlUpdate > 0) ? (currentTime - lastControlUpdate) / 1000.0 : 0.1;
   lastControlUpdate = currentTime;
 
   // Calculate error: setpoint - current (positive = need heat)
-  float error = setTemp - currentTemp;
+  float error = setTemp - currentTemp;  // TWO-STAGE HEATING LOGIC
+  // Stage 1: Front loop only (always on when heat needed)
+  // Stage 2: Engine loop + Fan (only if error >1.5°C OR heating for >20min)
 
-  // Determine if heating is needed (simple on/off for valve)
   if (error > 0.5) {  // Need heat (0.5°C threshold)
     if (!heatingActive) {
       heatingActive = true;
-      Serial.println("🔥 Heating activated");
+      heatingStartTime = currentTime;
+      Serial.println("🔥 STAGE 1: Heating activated (front loop only)");
       integralError = 0;  // Reset integral when starting
+    }
 
-      // Activate hardware triggers to plumbing board
-      // Both engine loop and front loop triggers go LOW (active)
-      digitalWrite(ENGINE_LOOP_PIN, LOW);
-      digitalWrite(FRONT_LOOP_PIN, LOW);
-      engineLoopOpen = true;
+    // STAGE 1: Always keep front loop active when heating
+    if (!frontLoopValveOpen) {
+      // digitalWrite(FRONT_LOOP_PIN, LOW);  // Hardware trigger disabled
+      if (mqttClient.connected()) {
+        mqttClient.publish(topic_front_loop_command, "OPEN", true);  // Retained
+      }
       frontLoopValveOpen = true;
-      Serial.println("⚡ Triggers activated: Engine + Front loops (LOW)");
+      Serial.println("⚡ Front loop: OPEN (via MQTT)");
       valveOpenTime = millis();
     }
 
-    // Calculate PI control and set fan speed
-    float controlOutput = calculatePIControl(error, deltaTime);
-    controlFan(controlOutput);
+    // Ensure diesel heater is set to HIGH when heating
+    if (mqttClient.connected() && dieselHeaterStatus != "HIGH") {
+      mqttClient.publish(topic_diesel_heater_command, "HIGH", false);
+      Serial.println("🔥 Commanding diesel heater to HIGH");
+    }
+
+    // Determine if Stage 2 should be active
+    unsigned long heatingDuration = currentTime - heatingStartTime;
+    bool needsStage2 = (error > STAGE2_ERROR_THRESHOLD) || (heatingDuration > STAGE2_DELAY);
+
+    if (needsStage2) {
+      // STAGE 2: Activate engine loop and fans
+      if (!engineLoopOpen) {
+        Serial.print("🔥🔥 STAGE 2: Engine loop activated - ");
+        if (error > STAGE2_ERROR_THRESHOLD) {
+          Serial.print("Error ");
+          Serial.print(error, 1);
+          Serial.println("°C > threshold");
+        } else {
+          Serial.print("Heating duration ");
+          Serial.print(heatingDuration / 60000);
+          Serial.println(" min > 20 min");
+        }
+        // digitalWrite(ENGINE_LOOP_PIN, LOW);  // Hardware trigger disabled
+        if (mqttClient.connected()) {
+          mqttClient.publish(topic_engine_loop_command, "OPEN", true);  // Retained
+        }
+        engineLoopOpen = true;
+        engineLoopOpenTime = currentTime;  // Record when engine loop opened
+        Serial.println("⚡ Engine loop: OPEN (via MQTT)");
+        Serial.println("⏱️  Fan will start in 5 minutes...");
+      }
+
+      // Only run fan if engine loop has been open for at least 5 minutes
+      unsigned long engineLoopDuration = currentTime - engineLoopOpenTime;
+      if (engineLoopDuration >= FAN_DELAY) {
+        // Calculate PI control and set fan speed
+        float controlOutput = calculatePIControl(error, deltaTime);
+        controlFan(controlOutput);
+      } else {
+        // Fan waiting period - keep it off
+        if (fanRunning) {
+          controlFan(0);
+          Serial.println("⏱️  Fan delayed - engine loop warming up");
+        }
+      }
+    } else {
+      // STAGE 1 only: Keep engine loop off, minimal/no fan
+      if (engineLoopOpen) {
+        Serial.println("⬇️ Dropping to STAGE 1: Engine loop deactivated");
+        // digitalWrite(ENGINE_LOOP_PIN, HIGH);  // Hardware trigger disabled
+        if (mqttClient.connected()) {
+          mqttClient.publish(topic_engine_loop_command, "CLOSE", true);  // Retained
+        }
+        engineLoopOpen = false;
+        engineLoopOpenTime = 0;  // Reset timer
+        controlFan(0);
+        integralError = 0;  // Reset integral when dropping stage
+      }
+    }
 
   } else if (error < -0.5) {  // Too hot
     if (heatingActive) {
@@ -590,21 +721,46 @@ void updateThermostat() {
       integralError = 0;
       lastControlOutput = 0;
 
-      // Deactivate hardware triggers to plumbing board
-      // Both engine loop and front loop triggers go HIGH (inactive)
-      digitalWrite(ENGINE_LOOP_PIN, HIGH);
-      digitalWrite(FRONT_LOOP_PIN, HIGH);
+      // Deactivate ALL triggers
+      // digitalWrite(ENGINE_LOOP_PIN, HIGH);  // Hardware trigger disabled
+      // digitalWrite(FRONT_LOOP_PIN, HIGH);   // Hardware trigger disabled
+      if (mqttClient.connected()) {
+        mqttClient.publish(topic_engine_loop_command, "CLOSE", true);  // Retained
+        mqttClient.publish(topic_front_loop_command, "CLOSE", true);   // Retained
+      }
       engineLoopOpen = false;
       frontLoopValveOpen = false;
-      Serial.println("⚡ Triggers deactivated: Engine + Front loops (HIGH)");
+      Serial.println("⚡ All loops closed (diesel heater unchanged)");
 
-      // Turn off fan immediately when too hot
+      // Turn off fan
       controlFan(0);
     }
   } else {
-    // Within deadband - maintain current state but zero fan if heating off
-    if (!heatingActive) {
-      controlFan(0);
+    // Within deadband (error between -0.5 and +0.5)
+    // If heating was active, keep it active (hysteresis)
+    // Only deactivate if we're clearly too hot (error < -0.5)
+    if (heatingActive) {
+      // Maintain front loop while in deadband with heating active
+      if (!frontLoopValveOpen) {
+        // digitalWrite(FRONT_LOOP_PIN, LOW);  // Hardware trigger disabled
+        if (mqttClient.connected()) {
+          mqttClient.publish(topic_front_loop_command, "OPEN", true);  // Retained
+        }
+        frontLoopValveOpen = true;
+      }
+    } else {
+      // Not heating - ensure everything is off
+      if (frontLoopValveOpen || engineLoopOpen || fanRunning) {
+        // digitalWrite(ENGINE_LOOP_PIN, HIGH);  // Hardware trigger disabled
+        // digitalWrite(FRONT_LOOP_PIN, HIGH);   // Hardware trigger disabled
+        if (mqttClient.connected()) {
+          mqttClient.publish(topic_engine_loop_command, "CLOSE", true);  // Retained
+          mqttClient.publish(topic_front_loop_command, "CLOSE", true);   // Retained
+        }
+        engineLoopOpen = false;
+        frontLoopValveOpen = false;
+        controlFan(0);
+      }
     }
   }
 }
@@ -714,73 +870,132 @@ void controlFan(float controlOutputPercent) {
 void checkButtons() {
   unsigned long currentTime = millis();
 
-  // Check if enough time has passed since last button press (debounce)
-  if (currentTime - lastButtonPress < BUTTON_DEBOUNCE_MS) {
-    return;
+  // Read current button states
+  bool upPressed = (digitalRead(TEMP_UP_BUTTON) == LOW);
+  bool downPressed = (digitalRead(TEMP_DOWN_BUTTON) == LOW);
+
+  // ========== PROCESS UP BUTTON ==========
+  if (upPressed != btnUp.currentlyPressed) {
+    // Button state changed - check debounce
+    if (currentTime - btnUp.lastChangeTime >= BUTTON_DEBOUNCE_MS) {
+      btnUp.currentlyPressed = upPressed;
+      btnUp.lastChangeTime = currentTime;
+
+      if (upPressed) {
+        // Button just pressed
+        btnUp.pressStartTime = currentTime;
+        btnUp.longPressTriggered = false;
+        Serial.println("⬆️ UP button pressed");
+      } else {
+        // Button released
+        unsigned long pressDuration = currentTime - btnUp.pressStartTime;
+
+        if (!btnUp.longPressTriggered && pressDuration < LONG_PRESS_MS) {
+          // Short press - increase temperature
+          setTemp += 0.5;
+          if (setTemp > 30.0) setTemp = 30.0;
+          Serial.print("🔼 Set temp increased to: ");
+          Serial.print(setTemp);
+          Serial.println("°C");
+          displayMode = DISPLAY_SET_TEMP;
+          displayModeChangeTime = currentTime;
+          updateDisplay();
+          publishThermostatStatus();
+        }
+        Serial.println("⬆️ UP button released");
+      }
+    }
   }
 
-  // Debug: Read button states every 2 seconds
-  static unsigned long lastDebug = 0;
-  if (millis() - lastDebug > 2000) {
-    Serial.print("UP Button (GPIO");
-    Serial.print(TEMP_UP_BUTTON);
-    Serial.print("): ");
-    Serial.print(digitalRead(TEMP_UP_BUTTON));
-    Serial.print(" | DOWN Button (GPIO");
-    Serial.print(TEMP_DOWN_BUTTON);
-    Serial.print("): ");
-    Serial.println(digitalRead(TEMP_DOWN_BUTTON));
-    lastDebug = millis();
+  // Check for long press while button is held
+  if (btnUp.currentlyPressed && !btnUp.longPressTriggered) {
+    if (currentTime - btnUp.pressStartTime >= LONG_PRESS_MS) {
+      btnUp.longPressTriggered = true;
+      if (heatMode != HEAT_AUTO) {
+        heatMode = HEAT_AUTO;
+        Serial.println("🔥 LONG PRESS UP: Heat mode = AUTO");
+        displayMessage = "HEAT AUTO";
+        displayMode = DISPLAY_MODE_CHANGE;
+        displayModeChangeTime = currentTime;
+        updateDisplay();
+        publishThermostatStatus();
+      }
+    }
   }
 
-  // Check UP button (active LOW with pullup)
-  if (digitalRead(TEMP_UP_BUTTON) == LOW) {
-    setTemp += 0.5;
-    if (setTemp > 30.0) setTemp = 30.0;  // Max 30°C
+  // ========== PROCESS DOWN BUTTON ==========
+  if (downPressed != btnDown.currentlyPressed) {
+    // Button state changed - check debounce
+    if (currentTime - btnDown.lastChangeTime >= BUTTON_DEBOUNCE_MS) {
+      btnDown.currentlyPressed = downPressed;
+      btnDown.lastChangeTime = currentTime;
 
-    Serial.print("🔼 Set temp increased to: ");
-    Serial.print(setTemp);
-    Serial.println("°C");
+      if (downPressed) {
+        // Button just pressed
+        btnDown.pressStartTime = currentTime;
+        btnDown.longPressTriggered = false;
+        Serial.println("⬇️ DOWN button pressed");
+      } else {
+        // Button released
+        unsigned long pressDuration = currentTime - btnDown.pressStartTime;
 
-    publishThermostatStatus();
-
-    // Show set temp on display for 3 seconds
-    showingSetTemp = true;
-    setTempDisplayTime = currentTime;
-    updateDisplay();
-
-    lastButtonPress = currentTime;
+        if (!btnDown.longPressTriggered && pressDuration < LONG_PRESS_MS) {
+          // Short press - decrease temperature
+          setTemp -= 0.5;
+          if (setTemp < 10.0) setTemp = 10.0;
+          Serial.print("🔽 Set temp decreased to: ");
+          Serial.print(setTemp);
+          Serial.println("°C");
+          displayMode = DISPLAY_SET_TEMP;
+          displayModeChangeTime = currentTime;
+          updateDisplay();
+          publishThermostatStatus();
+        }
+        Serial.println("⬇️ DOWN button released");
+      }
+    }
   }
 
-  // Check DOWN button (active LOW with pullup)
-  if (digitalRead(TEMP_DOWN_BUTTON) == LOW) {
-    setTemp -= 0.5;
-    if (setTemp < 10.0) setTemp = 10.0;  // Min 10°C
-
-    Serial.print("🔽 Set temp decreased to: ");
-    Serial.print(setTemp);
-    Serial.println("°C");
-
-    publishThermostatStatus();
-
-    // Show set temp on display for 3 seconds
-    showingSetTemp = true;
-    setTempDisplayTime = currentTime;
-    updateDisplay();
-
-    lastButtonPress = currentTime;
+  // Check for long press while button is held
+  if (btnDown.currentlyPressed && !btnDown.longPressTriggered) {
+    if (currentTime - btnDown.pressStartTime >= LONG_PRESS_MS) {
+      btnDown.longPressTriggered = true;
+      if (heatMode != HEAT_OFF) {
+        heatMode = HEAT_OFF;
+        Serial.println("🚫 LONG PRESS DOWN: Heat mode = OFF");
+        displayMessage = "HEAT OFF";
+        displayMode = DISPLAY_MODE_CHANGE;
+        displayModeChangeTime = currentTime;
+        updateDisplay();
+        publishThermostatStatus();
+      }
+    }
   }
 }
 
 void publishThermostatStatus() {
   if (mqttClient.connected()) {
-    // Publish set temperature
+    // Publish set temperature in Celsius
     char setTempStr[8];
     dtostrf(setTemp, 5, 1, setTempStr);
     mqttClient.publish(topic_thermostat_setTemp.c_str(), setTempStr, true);
 
+    // Publish set temperature in Fahrenheit
+    float setTempF = (setTemp * 9.0 / 5.0) + 32.0;
+    char setTempStrF[8];
+    dtostrf(setTempF, 5, 1, setTempStrF);
+    mqttClient.publish(topic_thermostat_setTempF.c_str(), setTempStrF, true);
+
     // Publish heating status
     mqttClient.publish(topic_thermostat_heating.c_str(), heatingActive ? "ON" : "OFF", false);
+
+    // Publish heat mode
+    const char* modeStr = (heatMode == HEAT_OFF) ? "OFF" : "AUTO";
+    mqttClient.publish("ThermostatMode", modeStr, true);
+
+    // Publish current loop states (retained for plumbing board sync)
+    mqttClient.publish(topic_front_loop_command, frontLoopValveOpen ? "OPEN" : "CLOSE", true);
+    mqttClient.publish(topic_engine_loop_command, engineLoopOpen ? "OPEN" : "CLOSE", true);
   }
 }
 
@@ -790,9 +1005,14 @@ void publishThermostatStatus() {
 void updateDisplay() {
   if (!displayConnected) return;
 
+  unsigned long currentTime = millis();
+
   // Check if we should return to showing current temp
-  if (showingSetTemp && (millis() - setTempDisplayTime > SET_TEMP_DISPLAY_DURATION)) {
-    showingSetTemp = false;
+  if (displayMode == DISPLAY_MODE_CHANGE && (currentTime - displayModeChangeTime > MODE_DISPLAY_DURATION)) {
+    displayMode = DISPLAY_CURRENT_TEMP;
+  }
+  if (displayMode == DISPLAY_SET_TEMP && (currentTime - displayModeChangeTime > SET_TEMP_DISPLAY_DURATION)) {
+    displayMode = DISPLAY_CURRENT_TEMP;
   }
 
   display.clearDisplay();
@@ -801,22 +1021,31 @@ void updateDisplay() {
   // Shift everything down by 20 pixels to account for display offset
   int yOffset = 20;
 
-  // Only show temperature - large size 2 font centered
-  display.setTextSize(2);
-  display.setCursor(8, 8 + yOffset);
-
-  if (showingSetTemp) {
+  if (displayMode == DISPLAY_MODE_CHANGE) {
+    // Show mode change message
+    display.setTextSize(1);
+    display.setCursor(4, 16 + yOffset);
+    display.print(displayMessage);
+  } else if (displayMode == DISPLAY_SET_TEMP) {
+    // Show set temperature
+    display.setTextSize(2);
+    display.setCursor(8, 8 + yOffset);
     float setTempF = (setTemp * 9.0 / 5.0) + 32.0;
     display.print((int)setTempF);
     display.print("F");
-  } else if (bmeConnected) {
-    float currentTempF = (currentTemp * 9.0 / 5.0) + 32.0;
-    display.print((int)currentTempF);
-    display.print("F");
   } else {
-    display.setTextSize(1);
-    display.setCursor(10, 16 + yOffset);
-    display.print("NO SENSOR");
+    // Show current temperature
+    display.setTextSize(2);
+    display.setCursor(8, 8 + yOffset);
+    if (bmeConnected) {
+      float currentTempF = (currentTemp * 9.0 / 5.0) + 32.0;
+      display.print((int)currentTempF);
+      display.print("F");
+    } else {
+      display.setTextSize(1);
+      display.setCursor(10, 16 + yOffset);
+      display.print("NO SENSOR");
+    }
   }
 
   display.display();
@@ -872,6 +1101,17 @@ void loop() {
     sendStatus();
     publishThermostatStatus();
     lastStatusUpdate = millis();
+  }
+
+  // Republish loop states every 30 seconds for resilience
+  static unsigned long lastLoopStatePublish = 0;
+  if (millis() - lastLoopStatePublish >= 30000) {
+    if (mqttClient.connected()) {
+      mqttClient.publish(topic_front_loop_command, frontLoopValveOpen ? "OPEN" : "CLOSE", true);
+      mqttClient.publish(topic_engine_loop_command, engineLoopOpen ? "OPEN" : "CLOSE", true);
+      Serial.println("🔄 Loop states republished (periodic sync)");
+    }
+    lastLoopStatePublish = millis();
   }
 
   delay(10);

@@ -31,8 +31,8 @@ const char* topic_allLock_command = "CabLockAllCommand";  // Group control
 Servo lockServo;
 
 // Lock positions (adjust based on your servo/latch mechanism)
-#define LOCKED_POSITION 5
-#define UNLOCKED_POSITION 90
+#define LOCKED_POSITION 90
+#define UNLOCKED_POSITION 5
 
 // MQTT Client
 WiFiClient wifiClient;

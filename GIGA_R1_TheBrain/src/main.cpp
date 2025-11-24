@@ -65,11 +65,24 @@ const char* topic_diesel_heater_status = "DieselHeaterStatus";
 // Rear loop and thermostat topics (shared between plumbing and thermostat pages)
 const char* topic_rear_loop_cmd = "RearLoopCommand";
 const char* topic_rear_loop_status = "RearLoopStatus";
+const char* topic_front_loop_cmd = "FrontLoopCommand";
+const char* topic_front_loop_status = "FrontLoopStatus";
+const char* topic_pump_cmd = "HotWaterPumpCommand";
+const char* topic_pump_status = "HotWaterPumpStatus";
+const char* topic_main_pump_cmd = "MainWaterPumpCommand";
+const char* topic_main_pump_status = "MainWaterPumpStatus";
+const char* topic_domestic_hw_cmd = "DomesticHotWaterCommand";
+const char* topic_domestic_hw_status = "DomesticHotWaterStatus";
 const char* topic_rear_thermostat_temp = "RearThermostatTemperature";
 const char* topic_rear_thermostat_humidity = "RearThermostatHumidity";
 const char* topic_rear_thermostat_pressure = "RearThermostatPressure";
 const char* topic_rear_thermostat_setpoint = "RearThermostatSetpoint";
 const char* topic_rear_thermostat_mode = "RearThermostatMode";  // AUTO/OFF
+
+// Additional temperature sensor topics
+const char* topic_hydronic_temp = "HydronicTemperature";
+const char* topic_fresh_water_temp = "FreshWaterTemperature";
+const char* topic_grey_water_temp = "GreyWaterTemperature";
 
 // ----------------- MQTT Client -----------------
 WiFiClient wifiClient;
@@ -191,13 +204,22 @@ const unsigned long THERMOSTAT_CONTROL_INTERVAL = 30000; // 30 seconds
 const unsigned long THERMOSTAT_BUTTON_COOLDOWN = 300;   // 300ms cooldown between button presses
 const float THERMOSTAT_HYSTERESIS = 1.0;  // °F
 
+// ----------------- Additional Temperature Sensors -----------------
+float hydronicTemp = 0.0;         // °F
+float freshWaterTemp = 0.0;       // °F
+float greyWaterTemp = 0.0;        // °F
+
 // ----------------- Plumbing System State -----------------
 bool freshWaterHeaterOn = false;
 bool greyWaterHeaterOn = false;
 bool exhaustFanOn = false;
+bool pumpRunning = false;
 bool rearLoopValveOpen = false;
 bool engineLoopValveOpen = false;
-String dieselHeaterState = "OFF";  // OFF, MID, or HIGH
+bool frontLoopValveOpen = false;
+String dieselHeaterState = "OFF";  // OFF, PUMP ONLY, or HIGH
+bool mainWaterPumpOn = true;
+bool DHWSolinoidOpen = false;
 
 // ============================================================================
 // FUNCTION DECLARATIONS
@@ -476,13 +498,23 @@ void subscribeToTopics() {
   mqttClient.subscribe(topic_rear_loop_status);
   mqttClient.subscribe(topic_engine_loop_status);
   mqttClient.subscribe(topic_diesel_heater_status);
+  mqttClient.subscribe(topic_front_loop_status);
+  mqttClient.subscribe(topic_pump_status);
+  mqttClient.subscribe(topic_main_pump_status);
+  mqttClient.subscribe(topic_domestic_hw_status);
 
   // Subscribe to thermostat topics
   mqttClient.subscribe(topic_rear_loop_status);
 
+  // Subscribe to temperature sensor topics
+  mqttClient.subscribe(topic_hydronic_temp);
+  mqttClient.subscribe(topic_fresh_water_temp);
+  mqttClient.subscribe(topic_grey_water_temp);
+
   Serial.println("✓ Subscribed to cabinet lock status topics (5 locks)");
   Serial.println("✓ Subscribed to plumbing system status topics");
   Serial.println("✓ Subscribed to thermostat topics");
+  Serial.println("✓ Subscribed to temperature sensor topics");
 }
 
 // ============================================================================
@@ -573,6 +605,18 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
 
+  if (String(topic) == topic_pump_status) {
+    bool newStatus = (message == "RUNNING" || message == "ON");
+    if (pumpRunning != newStatus) {
+      pumpRunning = newStatus;
+      Serial.print("  → Hot water pump: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
   if (String(topic) == topic_rear_loop_status) {
     bool newStatus = (message == "OPEN");
     if (rearLoopValveOpen != newStatus) {
@@ -603,6 +647,82 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       Serial.print("  → Diesel heater: ");
       Serial.println(message);
       if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_front_loop_status) {
+    bool newState = (message == "ON" || message == "OPEN");
+    if (frontLoopValveOpen != newState) {
+      frontLoopValveOpen = newState;
+      Serial.print("  → Front loop valve: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_main_pump_status) {
+    bool newStatus = (message == "ON");
+    if (mainWaterPumpOn != newStatus) {
+      mainWaterPumpOn = newStatus;
+      Serial.print("  → Main water pump: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_domestic_hw_status) {
+    bool newStatus = (message == "OPEN");
+    if (DHWSolinoidOpen != newStatus) {
+      DHWSolinoidOpen = newStatus;
+      Serial.print("  → Domestic HW Solinoid: ");
+      Serial.println(message);
+      if (currentPage == PAGE_PLUMBING) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  // Handle temperature sensor updates
+  if (String(topic) == topic_hydronic_temp) {
+    float newTemp = atof(message.c_str());
+    if (abs(hydronicTemp - newTemp) > 0.1) {
+      hydronicTemp = newTemp;
+      Serial.print("  → Hydronic temp: ");
+      Serial.print(hydronicTemp);
+      Serial.println("°F");
+      if (currentPage == PAGE_THERMOSTAT) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_fresh_water_temp) {
+    float newTemp = atof(message.c_str());
+    if (abs(freshWaterTemp - newTemp) > 0.1) {
+      freshWaterTemp = newTemp;
+      Serial.print("  → Fresh water temp: ");
+      Serial.print(freshWaterTemp);
+      Serial.println("°F");
+      if (currentPage == PAGE_THERMOSTAT) {
+        uiNeedsRedraw = true;
+      }
+    }
+  }
+
+  if (String(topic) == topic_grey_water_temp) {
+    float newTemp = atof(message.c_str());
+    if (abs(greyWaterTemp - newTemp) > 0.1) {
+      greyWaterTemp = newTemp;
+      Serial.print("  → Grey water temp: ");
+      Serial.print(greyWaterTemp);
+      Serial.println("°F");
+      if (currentPage == PAGE_THERMOSTAT) {
         uiNeedsRedraw = true;
       }
     }
@@ -1160,6 +1280,44 @@ void drawThermostatPage() {
   int textWidth = strlen(statusText) * 12;
   display.setCursor(400 - textWidth/2, 425);
   display.println(statusText);
+
+  // Additional Temperature Sensors Display (bottom of page)
+  display.setTextSize(1);
+  display.setTextColor(COLOR_TEXT_WHITE);
+
+  // Draw a separator line
+  display.drawLine(10, 455, 790, 455, COLOR_BORDER);
+
+  // Display temperature sensors in columns
+  // Left column
+  display.setCursor(20, 80);
+  display.print("Hydronic: ");
+  if (hydronicTemp != 0.0) {
+    display.print(hydronicTemp, 1);
+    display.print("F");
+  } else {
+    display.print("---");
+  }
+
+  // Middle column
+  display.setCursor(20, 120);
+  display.print("Fresh Tank: ");
+  if (freshWaterTemp != 0.0) {
+    display.print(freshWaterTemp, 1);
+    display.print("F");
+  } else {
+    display.print("---");
+  }
+
+  // Right column
+  display.setCursor(20, 160);
+  display.print("Grey Tank: ");
+  if (greyWaterTemp != 0.0) {
+    display.print(greyWaterTemp, 1);
+    display.print("F");
+  } else {
+    display.print("---");
+  }
 }
 
 // ============================================================================
@@ -1384,103 +1542,146 @@ void drawPlumbingPage() {
   // Page navigation
   drawPageNav();
 
-  // Button layout: 3 rows of 2 buttons each
-  // Row 1: Fresh Water Heater | Grey Water Heater
-  // Row 2: Exhaust Fan | Rear Loop Valve
-  // Row 3: Engine Loop Valve | Diesel Heater
+  // Button layout: 4 rows of 3 buttons each (12 buttons total)
+  // Row 1: Fresh Water | Grey Water | Exhaust Fan
+  // Row 2: Rear Loop | Engine Loop | Diesel Heater
+  // Row 3: Front Loop | Hot Water Pump | Main Water Pump
+  // Row 4: Domestic HW Solinoid | (empty) | (empty)
 
-  int buttonWidth = 360;
-  int buttonHeight = 90;
-  int leftX = 30;
-  int rightX = 410;
-  int row1Y = 80;
-  int row2Y = 190;
-  int row3Y = 300;
+  int buttonWidth = 240;
+  int buttonHeight = 85;
+  int col1X = 20;
+  int col2X = 275;
+  int col3X = 530;
+  int row1Y = 70;
+  int row2Y = 170;
+  int row3Y = 270;
+  int row4Y = 370;
 
-  // Fresh Water Heater
+  // Row 1, Col 1: Fresh Water Heater
   uint16_t freshColor = freshWaterHeaterOn ? COLOR_UNLOCKED : COLOR_LOCKED;
-  display.fillRoundRect(leftX, row1Y, buttonWidth, buttonHeight, 10, freshColor);
-  display.drawRoundRect(leftX, row1Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.fillRoundRect(col1X, row1Y, buttonWidth, buttonHeight, 10, freshColor);
+  display.drawRoundRect(col1X, row1Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
   display.setTextSize(2);
   display.setTextColor(COLOR_TEXT_BLACK);
-  display.setCursor(leftX + 40, row1Y + 25);
+  display.setCursor(col1X + 25, row1Y + 25);
   display.println("FRESH WATER");
-  display.setCursor(leftX + 80, row1Y + 50);
+  display.setCursor(col1X + 60, row1Y + 55);
   display.println(freshWaterHeaterOn ? "ON" : "OFF");
 
-  // Grey Water Heater
+  // Row 1, Col 2: Grey Water Heater
   uint16_t greyColor = greyWaterHeaterOn ? COLOR_UNLOCKED : COLOR_LOCKED;
-  display.fillRoundRect(rightX, row1Y, buttonWidth, buttonHeight, 10, greyColor);
-  display.drawRoundRect(rightX, row1Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.fillRoundRect(col2X, row1Y, buttonWidth, buttonHeight, 10, greyColor);
+  display.drawRoundRect(col2X, row1Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
   display.setTextSize(2);
   display.setTextColor(COLOR_TEXT_BLACK);
-  display.setCursor(rightX + 50, row1Y + 25);
+  display.setCursor(col2X + 25, row1Y + 25);
   display.println("GREY WATER");
-  display.setCursor(rightX + 80, row1Y + 50);
+  display.setCursor(col2X + 60, row1Y + 55);
   display.println(greyWaterHeaterOn ? "ON" : "OFF");
 
-  // Exhaust Fan
+  // Row 1, Col 3: Exhaust Fan
   uint16_t fanColor = exhaustFanOn ? COLOR_UNLOCKED : COLOR_LOCKED;
-  display.fillRoundRect(leftX, row2Y, buttonWidth, buttonHeight, 10, fanColor);
-  display.drawRoundRect(leftX, row2Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.fillRoundRect(col3X, row1Y, buttonWidth, buttonHeight, 10, fanColor);
+  display.drawRoundRect(col3X, row1Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
   display.setTextSize(2);
   display.setTextColor(COLOR_TEXT_BLACK);
-  display.setCursor(leftX + 60, row2Y + 25);
+  display.setCursor(col3X + 25, row1Y + 25);
   display.println("EXHAUST FAN");
-  display.setCursor(leftX + 80, row2Y + 50);
+  display.setCursor(col3X + 60, row1Y + 55);
   display.println(exhaustFanOn ? "ON" : "OFF");
 
-  // Rear Loop Valve
+  // Row 2, Col 1: Rear Loop Valve
   uint16_t rearColor = rearLoopValveOpen ? COLOR_UNLOCKED : COLOR_LOCKED;
-  display.fillRoundRect(rightX, row2Y, buttonWidth, buttonHeight, 10, rearColor);
-  display.drawRoundRect(rightX, row2Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.fillRoundRect(col1X, row2Y, buttonWidth, buttonHeight, 10, rearColor);
+  display.drawRoundRect(col1X, row2Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
   display.setTextSize(2);
   display.setTextColor(COLOR_TEXT_BLACK);
-  display.setCursor(rightX + 45, row2Y + 25);
+  display.setCursor(col1X + 45, row2Y + 25);
   display.println("REAR LOOP");
-  display.setCursor(rightX + 80, row2Y + 50);
+  display.setCursor(col1X + 60, row2Y + 55);
   display.println(rearLoopValveOpen ? "ON" : "OFF");
 
-  // Engine Loop Valve
+  // Row 2, Col 2: Engine Loop Valve
   uint16_t engineColor = engineLoopValveOpen ? COLOR_UNLOCKED : COLOR_LOCKED;
-  display.fillRoundRect(leftX, row3Y, buttonWidth, buttonHeight, 10, engineColor);
-  display.drawRoundRect(leftX, row3Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.fillRoundRect(col2X, row2Y, buttonWidth, buttonHeight, 10, engineColor);
+  display.drawRoundRect(col2X, row2Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
   display.setTextSize(2);
   display.setTextColor(COLOR_TEXT_BLACK);
-  display.setCursor(leftX + 35, row3Y + 25);
+  display.setCursor(col2X + 30, row2Y + 25);
   display.println("ENGINE LOOP");
-  display.setCursor(leftX + 80, row3Y + 50);
+  display.setCursor(col2X + 60, row2Y + 55);
   display.println(engineLoopValveOpen ? "ON" : "OFF");
 
-  // Diesel Heater (cycles through OFF -> MID -> HIGH)
+  // Row 2, Col 3: Diesel Heater (cycles through OFF -> PUMP ONLY -> HIGH)
   uint16_t dieselColor;
   if (dieselHeaterState == "HIGH") {
     dieselColor = 0xF800;  // Red for HIGH
-  } else if (dieselHeaterState == "MID") {
-    dieselColor = 0xFFE0;  // Yellow for MID
+  } else if (dieselHeaterState == "PUMP ONLY") {
+    dieselColor = 0xFFE0;  // Yellow for PUMP ONLY
   } else {
     dieselColor = COLOR_UNKNOWN;  // Gray for OFF
   }
-  display.fillRoundRect(rightX, row3Y, buttonWidth, buttonHeight, 10, dieselColor);
-  display.drawRoundRect(rightX, row3Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.fillRoundRect(col3X, row2Y, buttonWidth, buttonHeight, 10, dieselColor);
+  display.drawRoundRect(col3X, row2Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
   display.setTextSize(2);
   display.setTextColor(COLOR_TEXT_BLACK);
-  display.setCursor(rightX + 25, row3Y + 25);
+  display.setCursor(col3X + 8, row2Y + 25);
   display.println("DIESEL HEATER");
   display.setTextSize(3);
-  display.setCursor(rightX + 100, row3Y + 50);
+  display.setCursor(col3X + 75, row2Y + 55);
   display.println(dieselHeaterState);
 
-  // Footer info
-  display.setTextSize(1);
-  display.setTextColor(COLOR_TEXT_WHITE);
-  display.setCursor(10, 410);
-  display.println("Tap relay buttons to toggle ON/OFF");
-  display.setCursor(10, 425);
-  display.println("Diesel Heater cycles: OFF -> MID -> HIGH -> OFF");
+  // Row 3, Col 1: Front Loop Valve
+  uint16_t frontColor = frontLoopValveOpen ? COLOR_UNLOCKED : COLOR_LOCKED;
+  display.fillRoundRect(col1X, row3Y, buttonWidth, buttonHeight, 10, frontColor);
+  display.drawRoundRect(col1X, row3Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(col1X + 40, row3Y + 25);
+  display.println("FRONT LOOP");
+  display.setCursor(col1X + 60, row3Y + 55);
+  display.println(frontLoopValveOpen ? "ON" : "OFF");
+
+  // Row 3, Col 2: Hot Water Pump
+  uint16_t pumpColor = pumpRunning ? COLOR_UNLOCKED : COLOR_LOCKED;
+  display.fillRoundRect(col2X, row3Y, buttonWidth, buttonHeight, 10, pumpColor);
+  display.drawRoundRect(col2X, row3Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(col2X + 8, row3Y + 25);
+  display.println("HOT WATER PUMP");
+  display.setCursor(col2X + 60, row3Y + 55);
+  display.println(pumpRunning ? "ON" : "OFF");
+
+  // Row 3, Col 3: Main Water Pump
+  uint16_t mainPumpColor = mainWaterPumpOn ? COLOR_UNLOCKED : COLOR_LOCKED;
+  display.fillRoundRect(col3X, row3Y, buttonWidth, buttonHeight, 10, mainPumpColor);
+  display.drawRoundRect(col3X, row3Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(col3X + 8, row3Y + 20);
+  display.println("MAIN WATER");
+  display.setCursor(col3X + 35, row3Y + 45);
+  display.println("PUMP");
+  display.setCursor(col3X + 60, row3Y + 65);
+  display.setTextSize(2);
+  display.println(mainWaterPumpOn ? "ON" : "OFF");
+
+  // Row 4, Col 1: Domestic Hot Water Solinoid
+  uint16_t domesticHWColor = DHWSolinoidOpen ? COLOR_UNLOCKED : COLOR_LOCKED;
+  display.fillRoundRect(col1X, row4Y, buttonWidth, buttonHeight, 10, domesticHWColor);
+  display.drawRoundRect(col1X, row4Y, buttonWidth, buttonHeight, 10, COLOR_TEXT_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(COLOR_TEXT_BLACK);
+  display.setCursor(col1X + 20, row4Y + 25);
+  display.println("DOMESTIC HW");
+  display.setCursor(col1X + 40, row4Y + 55);
+  display.println(DHWSolinoidOpen ? "OPEN" : "CLOSED");
 
   // Connection status
-  display.setCursor(10, 460);
+  display.setCursor(10, 462);
+  display.setTextSize(1);
   display.print("IP: ");
   display.print(gigaIP);
   display.print(" | MQTT: ");
@@ -1563,65 +1764,99 @@ void handlePlumbingTouch() {
       }
     }
 
-    int buttonWidth = 360;
-    int buttonHeight = 90;
-    int leftX = 30;
-    int rightX = 410;
-    int row1Y = 80;
-    int row2Y = 190;
-    int row3Y = 300;
+    int buttonWidth = 240;
+    int buttonHeight = 85;
+    int col1X = 20;
+    int col2X = 275;
+    int col3X = 530;
+    int row1Y = 70;
+    int row2Y = 170;
+    int row3Y = 270;
+    int row4Y = 370;
 
-    // Check Fresh Water Heater button
-    if (x >= leftX && x <= (leftX + buttonWidth) && y >= row1Y && y <= (row1Y + buttonHeight)) {
+    // Row 1, Col 1: Fresh Water Heater
+    if (x >= col1X && x <= (col1X + buttonWidth) && y >= row1Y && y <= (row1Y + buttonHeight)) {
       sendPlumbingCommand(topic_fresh_water_heat_cmd, freshWaterHeaterOn ? "OFF" : "ON");
       lastTouchTime = currentMillis;
       touchCurrentlyPressed = true;
       return;
     }
 
-    // Check Grey Water Heater button
-    if (x >= rightX && x <= (rightX + buttonWidth) && y >= row1Y && y <= (row1Y + buttonHeight)) {
+    // Row 1, Col 2: Grey Water Heater
+    if (x >= col2X && x <= (col2X + buttonWidth) && y >= row1Y && y <= (row1Y + buttonHeight)) {
       sendPlumbingCommand(topic_grey_water_heat_cmd, greyWaterHeaterOn ? "OFF" : "ON");
       lastTouchTime = currentMillis;
       touchCurrentlyPressed = true;
       return;
     }
 
-    // Check Exhaust Fan button
-    if (x >= leftX && x <= (leftX + buttonWidth) && y >= row2Y && y <= (row2Y + buttonHeight)) {
+    // Row 1, Col 3: Exhaust Fan
+    if (x >= col3X && x <= (col3X + buttonWidth) && y >= row1Y && y <= (row1Y + buttonHeight)) {
       sendPlumbingCommand(topic_exhaust_fan_cmd, exhaustFanOn ? "OFF" : "ON");
       lastTouchTime = currentMillis;
       touchCurrentlyPressed = true;
       return;
     }
 
-    // Check Rear Loop Valve button
-    if (x >= rightX && x <= (rightX + buttonWidth) && y >= row2Y && y <= (row2Y + buttonHeight)) {
+    // Row 2, Col 1: Rear Loop Valve
+    if (x >= col1X && x <= (col1X + buttonWidth) && y >= row2Y && y <= (row2Y + buttonHeight)) {
       sendPlumbingCommand(topic_rear_loop_cmd, rearLoopValveOpen ? "CLOSE" : "OPEN");
       lastTouchTime = currentMillis;
       touchCurrentlyPressed = true;
       return;
     }
 
-    // Check Engine Loop Valve button
-    if (x >= leftX && x <= (leftX + buttonWidth) && y >= row3Y && y <= (row3Y + buttonHeight)) {
+    // Row 2, Col 2: Engine Loop Valve
+    if (x >= col2X && x <= (col2X + buttonWidth) && y >= row2Y && y <= (row2Y + buttonHeight)) {
       sendPlumbingCommand(topic_engine_loop_cmd, engineLoopValveOpen ? "CLOSE" : "OPEN");
       lastTouchTime = currentMillis;
       touchCurrentlyPressed = true;
       return;
     }
 
-    // Check Diesel Heater button (cycles through states)
-    if (x >= rightX && x <= (rightX + buttonWidth) && y >= row3Y && y <= (row3Y + buttonHeight)) {
+    // Row 2, Col 3: Diesel Heater (cycles through states)
+    if (x >= col3X && x <= (col3X + buttonWidth) && y >= row2Y && y <= (row2Y + buttonHeight)) {
       String nextState;
       if (dieselHeaterState == "OFF") {
-        nextState = "MID";
-      } else if (dieselHeaterState == "MID") {
+        nextState = "PUMP ONLY";
+      } else if (dieselHeaterState == "PUMP ONLY") {
         nextState = "HIGH";
       } else {
         nextState = "OFF";
       }
       sendPlumbingCommand(topic_diesel_heater_cmd, nextState.c_str());
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Row 3, Col 1: Front Loop Valve
+    if (x >= col1X && x <= (col1X + buttonWidth) && y >= row3Y && y <= (row3Y + buttonHeight)) {
+      sendPlumbingCommand(topic_front_loop_cmd, frontLoopValveOpen ? "OFF" : "ON");
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Row 3, Col 2: Hot Water Pump
+    if (x >= col2X && x <= (col2X + buttonWidth) && y >= row3Y && y <= (row3Y + buttonHeight)) {
+      sendPlumbingCommand(topic_pump_cmd, pumpRunning ? "OFF" : "ON");
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Row 3, Col 3: Main Water Pump
+    if (x >= col3X && x <= (col3X + buttonWidth) && y >= row3Y && y <= (row3Y + buttonHeight)) {
+      sendPlumbingCommand(topic_main_pump_cmd, mainWaterPumpOn ? "OFF" : "ON");
+      lastTouchTime = currentMillis;
+      touchCurrentlyPressed = true;
+      return;
+    }
+
+    // Row 4, Col 1: Domestic HW Solinoid
+    if (x >= col1X && x <= (col1X + buttonWidth) && y >= row4Y && y <= (row4Y + buttonHeight)) {
+      sendPlumbingCommand(topic_domestic_hw_cmd, DHWSolinoidOpen ? "CLOSE" : "OPEN");
       lastTouchTime = currentMillis;
       touchCurrentlyPressed = true;
       return;
