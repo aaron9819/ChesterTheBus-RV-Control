@@ -18,14 +18,15 @@
 // - Control critical safety systems (exhaust fan, tank heaters)
 // - Environmental monitoring (BME280: temp, humidity, pressure)
 // - Cabinet lock control (servo)
-// - Hot water pump PID control with pressure sensor
+// - Manifold pressure monitoring
 // - Valve control (rear loop, engine loop, front loop from thermostat triggers)
 // - Grey tank heat loop valve control
-// - Diesel heater 3-state control
+// - Diesel heater on/off control
+// - Electric heater on/off control (GPIO37, HIGH=on)
 // - All relay status publishing (authoritative source for valve states)
 // ============================================================================
 
-#define FIRMWARE_VERSION "v2.0.0-ESP32S2"
+#define FIRMWARE_VERSION "v3.1.0"
 #define CABINET_ID "RearPassSide"
 
 // ============================================================================
@@ -57,109 +58,110 @@ const char* Topic_Environment_Temp = "EnvironmentTempAmbient";
 const char* Topic_Environment_Humidity = "EnvironmentHumidity";
 const char* Topic_Environment_Pressure = "EnvironmentPressure";
 
-// Hot Water Pump (Publish & Subscribe)
-const char* Topic_Pump_Pressure = "HotWaterPumpPressure";
-const char* Topic_Pump_Speed = "HotWaterPumpSpeed";
-const char* Topic_Pump_Status = "HotWaterPumpStatus";
-const char* Topic_Pump_Command = "HotWaterPumpCommand";
-const char* Topic_Pump_SetPoint = "HotWaterPumpSetPoint";
-const char* Topic_Pump_RawADC = "HotWaterPumpRawADC";
-const char* Topic_Pump_Voltage = "HotWaterPumpVoltage";
+// Manifold Pressure (Publish Only)
+const char* Topic_Manifold_Pressure = "ManifoldPressure"; // PSI
 
 // Flow Sensor (Publish Only)
 const char* Topic_Flow_Rate = "HotWaterFlowRate";
-const char* Topic_Flow_Status = "HotWaterFlowStatus";
+const char* Topic_Flow_Status = "HotWaterFlowStatus"; // FLOWING / NOT_FLOWING
 
 // Main Water Pump (Publish & Subscribe)
-const char* Topic_MainPump_Command = "MainWaterPumpCommand";
-const char* Topic_MainPump_Status = "MainWaterPumpStatus";
+const char* Topic_MainPump_Command = "MainWaterPumpCommand"; // ON / OFF
+const char* Topic_MainPump_Status = "MainWaterPumpStatus"; // ON / OFF
 
 // Domestic Hot Water Loop (Publish & Subscribe)
-const char* Topic_DomesticHW_Command = "DomesticHotWaterCommand";
-const char* Topic_DomesticHW_Status = "DomesticHotWaterStatus";
+const char* Topic_DomesticHW_Command = "DomesticHotWaterCommand"; // OPEN / CLOSE
+const char* Topic_DomesticHW_Status = "DomesticHotWaterStatus"; // OPEN / CLOSE
 
 // Valve Status (Publish Only - This board is authoritative)
-const char* Topic_FreshWtrHeat_Status = "FreshWaterHeatStatus";
-const char* Topic_GreyWtrHeat_Status = "GreyWaterHeatStatus";
-const char* Topic_RearLoop_Status = "RearLoopStatus";
-const char* Topic_EngineLoop_Status = "EngineLoopStatus";
-const char* Topic_FrontLoop_Status = "FrontLoopStatus";
-const char* Topic_ExhaustFan_Status = "ExhaustFanStatus";
-const char* Topic_DieselHtr_Status = "DieselHeaterStatus";
+const char* Topic_FreshWtrHeat_Status = "FreshWaterHeatStatus"; // ON / Off
+const char* Topic_GreyWtrHeat_Status = "GreyWaterHeatStatus"; // ON / Off
+const char* Topic_RearLoop_Status = "RearLoopStatus"; // OPEN / CLOSE
+const char* Topic_EngineLoop_Status = "EngineLoopStatus"; // OPEN / CLOSE
+const char* Topic_FrontLoop_Status = "FrontLoopStatus"; // OPEN / CLOSE
+const char* Topic_ExhaustFan_Status = "ExhaustFanStatus"; // ON / OFF
+const char* Topic_DieselHtr_Status = "DieselHeaterStatus"; // OFF / ON
+const char* Topic_ElectricHtr_Status = "ElectricHeaterStatus"; // ON / OFF
 
 // Valve Commands (Subscribe)
-const char* Topic_FreshWtrHeat_Command = "FreshWaterHeatCommand";
-const char* Topic_GreyWtrHeat_Command = "GreyWaterHeatCommand";
-const char* Topic_RearLoop_Command = "RearLoopCommand";
-const char* Topic_EngineLoop_Command = "EngineLoopCommand";
-const char* Topic_FrontLoop_Command = "FrontLoopCommand";
-const char* Topic_ExhaustFan_Command = "ExhaustFanCommand";
-const char* Topic_DieselHtr_Command = "DieselHeaterCommand";
+const char* Topic_FreshWtrHeat_Command = "FreshWaterHeatCommand"; // ON / OFF
+const char* Topic_GreyWtrHeat_Command = "GreyWaterHeatCommand"; // ON / OFF
+const char* Topic_RearLoop_Command = "RearLoopCommand"; // OPEN / CLOSE
+const char* Topic_EngineLoop_Command = "EngineLoopCommand"; // OPEN / CLOSE
+const char* Topic_FrontLoop_Command = "FrontLoopCommand"; // OPEN / CLOSE
+const char* Topic_ExhaustFan_Command = "ExhaustFanCommand"; // ON / OFF
+const char* Topic_DieselHtr_Command = "DieselHeaterCommand"; // OFF / ON
+const char* Topic_ElectricHtr_Command = "ElectricHeaterCommand"; // ON / OFF
 
 // Cabinet Lock Topics
-const char* Topic_CabLock_Command = "CabLockRearPassSideCommand";
-const char* Topic_CabLock_Status = "CabLockRearPassSideStatus";
-const char* Topic_AllLock_Command = "CabLockAllCommand";
+const char* Topic_CabLock_Command = "CabLockRearPassSideCommand"; // LOCK / UNLOCK
+const char* Topic_CabLock_Status = "CabLockRearPassSideStatus"; // LOCKED / UNLOCKED
+const char* Topic_AllLock_Command = "CabLockAllCommand"; // LOCK / UNLOCK
 
-// Mode Topics (Subscribe)
-const char* Topic_FreshWtrHeat_Mode = "FreshWaterHeatMode";
-const char* Topic_GreyWtrHeat_Mode = "GreyWaterHeatMode";
-const char* Topic_ExhaustFan_Mode = "ExhaustFanMode";
+// Mode Topics (Subscribe) - Single global mode controls all automation
+const char* Topic_Plumbing_Mode = "PlumbingMode"; // AUTO / MANUAL (global - state)
+const char* Topic_Plumbing_ModeCmd = "PlumbingModeCommand"; // AUTO / MANUAL (global - command)
 
-// Configuration Topics
+// Configuration Topics (State - Published by board)
 const char* Topic_FreshWtrHeat_TempSet = "FreshWaterHeatTempSet";
 const char* Topic_GreyWtrHeat_TempSet = "GreyWaterHeatTempSet";
-const char* Topic_ExhaustFan_TempHigh = "ExhaustFanTempHigh";
-const char* Topic_ExhaustFan_TempLow = "ExhaustFanTempLow";
+const char* Topic_ExhaustFan_TempSet = "ExhaustFanTempSet"; // Single setpoint for fan
 
-// Alert Topics (Publish Only)
-const char* Topic_Alert_Freeze_Warning = "AlertFreezeWarning";
-const char* Topic_Alert_High_Temp = "AlertHighTemp";
-const char* Topic_Alert_System_Error = "AlertSystemError";
-const char* Topic_Alert_Pump_Error = "AlertPumpError";
-const char* Topic_Alert_High_Humidity = "AlertHighHumidity";
+// Configuration Command Topics (Commands from HA - Subscribed by board)
+const char* Topic_FreshWtrHeat_TempSetCmd = "FreshWaterHeatTempSetCommand";
+const char* Topic_GreyWtrHeat_TempSetCmd = "GreyWaterHeatTempSetCommand";
+const char* Topic_ExhaustFan_TempSetCmd = "ExhaustFanTempSetCommand";
+
+// Alert Topics (Publish Only) - Consolidated
+// Use a single alert topic that carries descriptive text for the most
+// recent alert. Retained=true so Home Assistant can show the last alert.
+const char* Topic_Alert = "PlumbingAlert"; // Descriptive retained alert messages
+
+// Forward declarations for alert helpers (implemented later)
+void publishAlertRaw(const String &msg);
+void refreshAlertPublish();
 
 // Safety Command Topics (Subscribe)
-const char* Topic_Clear_High_Humidity = "ClearHighHumidityCommand";
+const char* Topic_Clear_High_Humidity = "ClearHighHumidityCommand"; // CLEAR
 
 // System Health (Publish Only)
-const char* Topic_Plumbing_Status = "PlumbingSystemStatus";
+const char* Topic_Plumbing_Status = "PlumbingSystemStatus"; // ONLINE / ERROR
 const char* Topic_Plumbing_Uptime = "PlumbingUptime";
 const char* Topic_Firmware_Version = "PlumbingFirmwareVersion";
 
 // ============================================================================
 // HARDWARE PIN DEFINITIONS - ESP32-S2 Mini
 // ============================================================================
-// DS18B20 Temperature Sensors
-#define ONE_WIRE_BUS 15              // GPIO11 for DS18B20 data
+// DS18B20 Temperature Sensors (All on shared OneWire bus)
+#define TEMP_SENSOR_PIN 13           // GPIO13 - Shared OneWire bus for all temperature sensors
+// Sensor indices on shared bus:
+// Index 0: Return manifold
+// Index 1: Hydronic tank
+// Index 2: Grey water tank
+// Index 3: Fresh water tank
 
-// Relay Outputs (Active LOW)
-#define FRESH_WATER_HEATER_PIN 9     // GPIO10 - Fresh water tank heater
+// Relay Outputs (Active LOW unless noted)
+#define FRESH_WATER_HEATER_PIN 9     // GPIO9 - Fresh water tank heater
 #define GREY_WATER_HEATER_PIN 2      // GPIO2 - Grey water tank heater
-#define EXHAUST_FAN_PIN 21            // GPIO3 - Exhaust fan
-#define MAIN_WATER_PUMP_PIN 18       // GPIO18 - Main water pump (city water pressure)
-#define DOMESTIC_HW_SOLINOID_PIN 10      // GPIO10 - Domestic hot water loop valve
-#define REAR_LOOP_VALVE_PIN 5        // GPIO4 - Rear loop valve
-#define ENGINE_LOOP_VALVE_PIN 3      // GPIO5 - Engine loop valve
-#define FRONT_LOOP_VALVE_PIN 4       // GPIO6 - Front loop valve (controlled by plumbing board)
-#define DIESEL_HEATER_PIN 8          // GPIO7 - Diesel heater relay 1 (white wire)
-#define DIESEL_HEATER_2_PIN 7        // GPIO8 - Diesel heater relay 2 (blue wire)
-#define DIESEL_HEATER_3_PIN 6        // GPIO9 - Diesel heater relay 3 (yellow wire)
+#define EXHAUST_FAN_PIN 12           // GPIO12 - Exhaust fan
+#define MAIN_WATER_PUMP_PIN 11       // GPIO11 - Main water pump (normally closed relay)
+#define DOMESTIC_HW_SOLINOID_PIN 10  // GPIO10 - Domestic hot water loop valve
+#define REAR_LOOP_VALVE_PIN 5        // GPIO5 - Rear loop valve
+#define ENGINE_LOOP_VALVE_PIN 3      // GPIO3 - Engine loop valve
+#define FRONT_LOOP_VALVE_PIN 4       // GPIO4 - Front loop valve
+#define DIESEL_HEATER_PIN 8          // GPIO8 - Diesel heater relay 1 (white wire)
+#define DIESEL_HEATER_2_PIN 7        // GPIO7 - Diesel heater relay 2 (blue wire)
+#define DIESEL_HEATER_3_PIN 6        // GPIO6 - Diesel heater relay 3 (yellow wire)
+#define ELECTRIC_HEATER_PIN 37       // GPIO37 - Electric heater relay (HIGH = ON)
 
 // Cabinet Lock Servo
 #define SERVO_PIN 16                 // GPIO16 - Servo control
 
-// Hot Water Pump PWM Control
-#define PUMP_PWM_PIN 12              // GPIO12 - PWM output to pump controller
-#define PUMP_PWM_CHANNEL 3           // PWM channel 2
-#define PUMP_PWM_FREQ 10000         // 25kHz PWM frequency
-#define PUMP_PWM_RESOLUTION 8        // 8-bit resolution (0-255)
-
-// Pressure Sensor (Analog Input)
+// Pressure Sensor (Analog Input) - manifold pressure sensor
 #define PRESSURE_SENSOR_PIN 1        // ADC1_CH0 (GPIO1) - 0.5V-4.5V = 0-80 PSI
 
 // Flow sensor (Digital Input)
-#define FLOW_SENSOR_PIN 17           // GPIO15 - Flow sensor input (not used in current code)
+#define FLOW_SENSOR_PIN 17           // GPIO17 - Flow sensor input
 
 // I2C for BME280
 #define BME280_SDA 33                // GPIO33 - I2C SDA
@@ -168,14 +170,11 @@ const char* Topic_Firmware_Version = "PlumbingFirmwareVersion";
 // ============================================================================
 // SENSOR SETUP
 // ============================================================================
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature tempSensors(&oneWire);
+// Shared OneWire bus for all DS18B20 sensors
+OneWire tempSensorWire(TEMP_SENSOR_PIN);
 
-// DS18B20 sensor indices
-#define SENSOR_HYDRONIC 2
-#define SENSOR_FRESH_WATER 0
-#define SENSOR_GREY_WATER 1
-#define SENSOR_RETURN_MANIFOLD 3
+// Single DallasTemperature instance for all sensors
+DallasTemperature tempSensors(&tempSensorWire);
 
 // BME280 Environmental Sensor
 Adafruit_BME280 bme;
@@ -185,25 +184,10 @@ bool bmeAvailable = false;
 Servo lockServo;
 
 // ============================================================================
-// PUMP SPEED CONTROL (Fixed Speeds)
+// PRESSURE & FLOW CONTROL
 // ============================================================================
-// Pump speed settings (adjustable)
-const float PUMP_SPEED_FLOW_DETECTED = 100.0;  // 100% when flow detected
-const float PUMP_SPEED_LOOPS_OPEN = 70.0;      // 70% when valves open (no flow)
-const float PUMP_MIN_SPEED = 30.0;             // Minimum threshold to run pump
-
-// Safety limits for pressure monitoring
-const float PRESSURE_MIN_ALARM = 2.0;         // Alarm if < 2 PSI while running
-const float PRESSURE_MAX_ALARM = 40.0;        // Alarm if > 40 PSI while running
-const unsigned long PUMP_STARTUP_GRACE_PERIOD = 5000;  // 5 seconds for pressure to build
-
-// Pressure & Pump State
-float currentPressure = 0.0;
-float pumpSpeed = 0.0;  // 0-100%
-bool pumpRunning = false;
-bool pumpAlarm = false;
-String pumpAlarmReason = "";
-unsigned long pumpStartTime = 0;
+// Manifold pressure value (psi)
+float manifoldPressure = 0.0;
 
 // Valve Control Sources (MQTT only)
 bool engineLoopMqttRequest = false;  // MQTT command from GIGA
@@ -221,23 +205,6 @@ const unsigned long FLOW_CALC_INTERVAL = 1000;  // Calculate flow every second
 const unsigned long FLOW_TIMEOUT = 3000;        // If no pulses for 3 seconds, flow has stopped
 const unsigned long MIN_PULSES_FOR_FLOW = 10;   // Minimum pulses per second to consider as real flow
 
-// Pump Auto Control
-String pumpMode = "AUTO";  // AUTO or MANUAL
-bool pumpAutoStarted = false;  // Track if pump was auto-started
-unsigned long lastManualPumpControl = 0;  // Track last manual interaction
-const unsigned long MANUAL_TIMEOUT = 30000;  // 30 seconds to revert to AUTO
-
-// Loop Timer Management (10-minute Delays before adding pressure boost)
-const unsigned long LOOP_DELAY_TIME = 600000;  // 10 minutes in milliseconds 600000
-unsigned long rearLoopOpenTime = 0;
-unsigned long engineLoopOpenTime = 0;
-unsigned long frontLoopOpenTime = 0;
-unsigned long greyLoopOpenTime = 0;
-bool rearLoopDelayComplete = false;
-bool engineLoopDelayComplete = false;
-bool frontLoopDelayComplete = false;
-bool greyLoopDelayComplete = false;
-
 // Pressure Relief (open DHW valve after pump stops)
 bool pressureReliefActive = false;
 unsigned long pressureReliefStartTime = 0;
@@ -245,11 +212,10 @@ const unsigned long PRESSURE_RELIEF_DURATION = 2000;  // 2 seconds
 
 // ============================================================================
 // CONFIGURATION VARIABLES
-// ============================================================================
+// ==========================================================================
 float freshWaterTempTarget = 40.0;    // °F
 float greyWaterTempTarget = 35.0;     // °F
-float exhaustFanTempHigh = 85.0;      // °F
-float exhaustFanTempLow = 75.0;       // °F
+float exhaustFanTempSet = 85.0;       // °F - Exhaust fan on setpoint (hysteresis applied)
 
 #define FREEZE_WARNING_TEMP 35.0      // °F
 #define HIGH_TEMP_WARNING 180.0       // °F
@@ -264,18 +230,13 @@ bool exhaustFanOn = false;
 bool rearLoopOpen = false;
 bool engineLoopOpen = false;
 bool frontLoopOpen = false;
-bool dieselHeaterState = 0;  // 0=OFF, 1=PUMP ONLY, 2=HIGH
+bool dieselHeaterOn = false;  // false=OFF, true=ON
+bool electricHeaterOn = false;  // false=OFF, true=ON (HIGH=on)
 bool mainWaterPumpOn = true;  // Initialized HIGH (relay OFF) = pump ON for normally closed
 bool DHWSolinoidOpen = false;
 
-// Modes
-String freshWaterMode = "AUTO";
-String greyWaterMode = "AUTO";
-String exhaustFanMode = "AUTO";
-
-// Debug Publishing
-unsigned long lastDebugPublish = 0;
-const unsigned long DEBUG_PUBLISH_INTERVAL = 10000;  // 10 seconds
+// Mode - single global mode controls all automation
+String plumbingMode = "AUTO"; // AUTO or MANUAL
 
 // Cabinet Lock State
 enum LockState {
@@ -296,6 +257,13 @@ float environmentTemp = -999.0;
 float environmentHumidity = -999.0;
 float environmentPressure = -999.0;
 
+// Temperature Filtering - Moving Average Filter (5 samples)
+#define TEMP_FILTER_SIZE 5
+float freshWaterTempBuffer[TEMP_FILTER_SIZE] = {-999.0, -999.0, -999.0, -999.0, -999.0};
+float greyWaterTempBuffer[TEMP_FILTER_SIZE] = {-999.0, -999.0, -999.0, -999.0, -999.0};
+int tempBufferIndex = 0;
+bool tempFilterInitialized = false;
+
 // Alert States
 bool freezeWarningActive = false;
 bool highTempWarningActive = false;
@@ -303,19 +271,22 @@ bool highHumidityAlarmActive = false;
 
 // Humidity Leak Detection
 float lastHumidity = -999.0;
+float baselineHumidity = -999.0;              // Baseline humidity before spike detected
 const float HUMIDITY_SPIKE_THRESHOLD = 10.0;  // % increase that triggers alarm
+const float HUMIDITY_SPIKE_TOLERANCE = 3.0;   // % tolerance for spike recovery (must return within 3% of baseline)
 const float HUMIDITY_RATE_WINDOW = 60000;     // 1 minute window for rate check
+const unsigned long SPIKE_RECOVERY_TIMEOUT = 30000;  // 30 second window to detect spike recovery
 unsigned long lastHumidityCheck = 0;
+unsigned long spikeDetectedTime = 0;          // Timestamp when spike was first detected
+bool humiditySpikePending = false;            // Flag indicating spike detected, waiting for confirmation
 
 // Timing Variables
 unsigned long lastSensorRead = 0;
 unsigned long lastPressureRead = 0;
-unsigned long lastPIDUpdate = 0;
 unsigned long lastStatusPublish = 0;
 unsigned long lastHealthPublish = 0;
 const unsigned long SENSOR_READ_INTERVAL = 5000;      // 5 seconds
-const unsigned long PRESSURE_READ_INTERVAL = 100;     // 100ms (fast for PID)
-const unsigned long PID_UPDATE_INTERVAL = 100;        // 100ms
+const unsigned long PRESSURE_READ_INTERVAL = 1000;    // 1 second
 const unsigned long STATUS_PUBLISH_INTERVAL = 10000;  // 10 seconds
 const unsigned long HEALTH_PUBLISH_INTERVAL = 60000;  // 60 seconds
 
@@ -349,14 +320,10 @@ void publishTemperatures();
 void readBME280();
 void publishBME280();
 
-// Pressure & Pump Control
+// Pressure & Flow
 float readPressure();
-void controlPump(float speedPercent);
-void checkPumpSafety();
 void calculateFlowRate();
 void publishFlowRate();
-void handleAutoPump();
-bool shouldPumpBeRunning();
 void IRAM_ATTR flowSensorISR();
 
 // Valve Control Functions
@@ -366,7 +333,8 @@ void controlExhaustFan(bool turnOn);
 void controlRearLoopValve(bool open);
 void controlEngineLoopValve(bool open);
 void controlFrontLoopValve(bool open);
-void controlDieselHeater(int state);
+void controlDieselHeater(bool turnOn);
+void controlElectricHeater(bool turnOn);
 void controlMainWaterPump(bool turnOn);
 void controlDHWSolinoid(bool open);
 
@@ -384,7 +352,10 @@ void publishStatus();
 void publishHealth();
 void saveConfigToPreferences();
 void loadConfigFromPreferences();
-void restoreValveStates();
+void saveValveStatesToEEPROM();
+void flushEEPROM();
+void restoreValveStatesFromEEPROM();
+void publishAllStatesToBroker();
 
 // ============================================================================
 // SETUP
@@ -414,10 +385,11 @@ void setup() {
   pinMode(DIESEL_HEATER_PIN, OUTPUT);
   pinMode(DIESEL_HEATER_2_PIN, OUTPUT);
   pinMode(DIESEL_HEATER_3_PIN, OUTPUT);
+  pinMode(ELECTRIC_HEATER_PIN, OUTPUT);
   pinMode(MAIN_WATER_PUMP_PIN, OUTPUT);
   pinMode(DOMESTIC_HW_SOLINOID_PIN, OUTPUT);
 
-  // Initialize all relays to OFF (HIGH = OFF for active LOW)
+  // Initialize all relays to OFF (HIGH = OFF for active LOW, except electric heater: LOW = OFF)
   digitalWrite(FRESH_WATER_HEATER_PIN, HIGH);
   digitalWrite(GREY_WATER_HEATER_PIN, HIGH);
   digitalWrite(EXHAUST_FAN_PIN, HIGH);
@@ -427,6 +399,7 @@ void setup() {
   digitalWrite(DIESEL_HEATER_PIN, HIGH);
   digitalWrite(DIESEL_HEATER_2_PIN, HIGH);
   digitalWrite(DIESEL_HEATER_3_PIN, HIGH);
+  digitalWrite(ELECTRIC_HEATER_PIN, LOW);  // HIGH = ON, so LOW = OFF
   digitalWrite(MAIN_WATER_PUMP_PIN, HIGH); // RELAY IS NORMALLY CLOSED
   digitalWrite(DOMESTIC_HW_SOLINOID_PIN, HIGH);
   Serial.println("✓ Relay pins configured (Active LOW, all systems OFF)");
@@ -441,16 +414,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR_PIN), flowSensorISR, FALLING);
   Serial.println("✓ Flow sensor initialized with interrupt (GPIO17)");
 
-  // Initialize pump PWM
-  ledcSetup(PUMP_PWM_CHANNEL, PUMP_PWM_FREQ, PUMP_PWM_RESOLUTION);
-  ledcAttachPin(PUMP_PWM_PIN, PUMP_PWM_CHANNEL);
-  ledcWrite(PUMP_PWM_CHANNEL, 0);  // Start at 0% duty cycle
-
-  Serial.print("✓ Pump PWM initialized on GPIO");
-  Serial.print(PUMP_PWM_PIN);
-  Serial.print(" at ");
-  Serial.print(PUMP_PWM_FREQ);
-  Serial.println(" Hz (starting at 0%)");
+  // Pump PWM initialization removed (external pump)
 
   // Initialize servo for cabinet lock
   ESP32PWM::allocateTimer(0);
@@ -475,36 +439,80 @@ void setup() {
     Serial.println("⚠ BME280 sensor NOT found");
   }
 
-  // Initialize DS18B20 temperature sensors
+  // Initialize DS18B20 temperature sensors (shared OneWire bus on pin 13)
+  Serial.println("Initializing DS18B20 temperature sensors...");
+
   tempSensors.begin();
+
   delay(100);  // Give sensors time to initialize
 
-  int sensorCount = tempSensors.getDeviceCount();
-  Serial.print("✓ Found ");
-  Serial.print(sensorCount);
-  Serial.println(" DS18B20 temperature sensor(s)");
-
-  // Set resolution and print addresses for all sensors
-  if (sensorCount > 0) {
-    Serial.println("Sensor addresses:");
-    for (int i = 0; i < sensorCount; i++) {
-      DeviceAddress addr;
-      if (tempSensors.getAddress(addr, i)) {
-        // Set resolution for this sensor
-        tempSensors.setResolution(addr, 12);
-
-        // Print address
-        Serial.print("  Sensor ");
-        Serial.print(i);
-        Serial.print(": 0x");
-        for (uint8_t j = 0; j < 8; j++) {
-          if (addr[j] < 16) Serial.print("0");
-          Serial.print(addr[j], HEX);
-        }
-        Serial.println();
-      }
+  // Set resolution for all sensors
+  DeviceAddress addr;
+  for (int i = 0; i < tempSensors.getDeviceCount(); i++) {
+    if (tempSensors.getAddress(addr, i)) {
+      tempSensors.setResolution(addr, 12);
     }
   }
+
+  // Check and report sensor availability
+  int sensorCount = tempSensors.getDeviceCount();
+
+  Serial.println("Temperature sensor status:");
+  Serial.print("Total sensors found on GPIO");
+  Serial.print(TEMP_SENSOR_PIN);
+  Serial.print(": ");
+  Serial.println(sensorCount);
+
+  // Index 0: Return manifold
+  if (sensorCount > 0 && tempSensors.getAddress(addr, 0)) {
+    Serial.print("  ✓ Return Manifold sensor (Index 0): 0x");
+    for (uint8_t j = 0; j < 8; j++) {
+      if (addr[j] < 16) Serial.print("0");
+      Serial.print(addr[j], HEX);
+    }
+    Serial.println();
+  } else {
+    Serial.println("  ⚠ Return Manifold sensor NOT found (Index 0)");
+  }
+
+  // Index 1: Hydronic tank
+  if (sensorCount > 1 && tempSensors.getAddress(addr, 1)) {
+    Serial.print("  ✓ Hydronic sensor (Index 1): 0x");
+    for (uint8_t j = 0; j < 8; j++) {
+      if (addr[j] < 16) Serial.print("0");
+      Serial.print(addr[j], HEX);
+    }
+    Serial.println();
+  } else {
+    Serial.println("  ⚠ Hydronic sensor NOT found (Index 1)");
+  }
+
+  // Index 2: Grey water tank
+  if (sensorCount > 2 && tempSensors.getAddress(addr, 2)) {
+    Serial.print("  ✓ Grey Water sensor (Index 2): 0x");
+    for (uint8_t j = 0; j < 8; j++) {
+      if (addr[j] < 16) Serial.print("0");
+      Serial.print(addr[j], HEX);
+    }
+    Serial.println();
+  } else {
+    Serial.println("  ⚠ Grey Water sensor NOT found (Index 2)");
+  }
+
+  // Index 3: Fresh water tank
+  if (sensorCount > 3 && tempSensors.getAddress(addr, 3)) {
+    Serial.print("  ✓ Fresh Water sensor (Index 3): 0x");
+    for (uint8_t j = 0; j < 8; j++) {
+      if (addr[j] < 16) Serial.print("0");
+      Serial.print(addr[j], HEX);
+    }
+    Serial.println();
+  } else {
+    Serial.println("  ⚠ Fresh Water sensor NOT found (Index 3)");
+  }
+
+  Serial.print("✓ Total DS18B20 sensors found: ");
+  Serial.println(sensorCount);
 
   // Connect to WiFi
   setupWifi();
@@ -513,7 +521,12 @@ void setup() {
   setupOTA();
 
   // Initialize task watchdog: reset device on panic after timeout
-  esp_task_wdt_init(WATCHDOG_TIMEOUT_SEC, true);
+  esp_task_wdt_config_t wdtConfig = {
+    .timeout_ms = WATCHDOG_TIMEOUT_SEC * 1000,
+    .idle_core_mask = 0,
+    .trigger_panic = true,
+  };
+  esp_task_wdt_reconfigure(&wdtConfig);
   esp_task_wdt_add(NULL); // add current task (the loop task)
   Serial.print("✓ Task watchdog enabled (");
   Serial.print(WATCHDOG_TIMEOUT_SEC);
@@ -522,10 +535,11 @@ void setup() {
   // Setup MQTT
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(mqttCallback);
-  client.setBufferSize(512);
+  client.setBufferSize(1024);
 
-  // Restore valve states to match saved MQTT requests
-  restoreValveStates();
+  // Restore valve states from EEPROM (board is authoritative)
+  restoreValveStatesFromEEPROM();
+  delay(500);  // Let hardware settle
 
   Serial.println("\n✓ Initialization complete");
   Serial.println("============================================\n");
@@ -561,7 +575,7 @@ void loop() {
     // Read pressure sensor and update PID (fast loop)
     if (currentMillis - lastPressureRead >= PRESSURE_READ_INTERVAL) {
       lastPressureRead = currentMillis;
-      currentPressure = readPressure();
+      manifoldPressure = readPressure();
     }
 
     // Calculate flow rate periodically (1 second)
@@ -583,59 +597,6 @@ void loop() {
         }
       }
     }
-
-    // Check for manual mode timeout (revert to AUTO after 30 seconds)
-    if (pumpMode == "MANUAL" && (currentMillis - lastManualPumpControl >= MANUAL_TIMEOUT)) {
-      pumpMode = "AUTO";
-      Serial.println("⏱️ Manual timeout: Switching pump to AUTO mode");
-      client.publish("HotWaterPumpMode", "AUTO");
-    }
-
-    // Handle automatic pump control (check every 100ms for fast response)
-    static unsigned long lastAutoPumpCheck = 0;
-    if (currentMillis - lastAutoPumpCheck >= 100) {
-      lastAutoPumpCheck = currentMillis;
-      handleAutoPump();
-
-      // Debug pump state every 5 seconds
-      static unsigned long lastPumpDebug = 0;
-      if (currentMillis - lastPumpDebug >= 5000) {
-        lastPumpDebug = currentMillis;
-        Serial.print("🔍 Pump Debug: Mode=");
-        Serial.print(pumpMode);
-        Serial.print(" | Running=");
-        Serial.print(pumpRunning);
-        Serial.print(" | Auto=");
-        Serial.print(pumpAutoStarted);
-        Serial.print(" | Speed=");
-        Serial.print(pumpSpeed);
-        Serial.print("% | Pressure=");
-        Serial.print(currentPressure);
-        Serial.println(" PSI");
-      }
-    }
-
-    // Update pump speed based on conditions
-    if (currentMillis - lastPIDUpdate >= PID_UPDATE_INTERVAL) {
-      lastPIDUpdate = currentMillis;
-
-      if (pumpRunning && !pumpAlarm) {
-        // Simple speed control: 100% for flow, 70% for loops
-        float targetSpeed;
-        if (flowDetected) {
-          targetSpeed = PUMP_SPEED_FLOW_DETECTED;
-        } else {
-          targetSpeed = PUMP_SPEED_LOOPS_OPEN;
-        }
-        controlPump(targetSpeed);
-        checkPumpSafety();
-      } else if (!pumpRunning) {
-        // Ensure pump is OFF - explicitly set PWM to 0
-        controlPump(0);
-      }
-    }
-
-
 
     // Read temperature sensors
     if (currentMillis - lastSensorRead >= SENSOR_READ_INTERVAL) {
@@ -663,6 +624,9 @@ void loop() {
       lastHealthPublish = currentMillis;
       publishHealth();
     }
+
+    // Flush deferred EEPROM writes (debounced to reduce flash wear)
+    flushEEPROM();
   }
 
   delay(10);
@@ -744,7 +708,7 @@ void setupOTA() {
 
   ArduinoOTA.onStart([]() {
     otaInProgress = true;
-    controlPump(0);  // Stop pump during OTA
+    // Pump is controlled externally; firmware will not change pump state during OTA
     Serial.println("\n🔄 OTA Update Starting...");
     // Detach watchdog for this task while OTA runs to avoid timeout during long uploads
     esp_task_wdt_delete(NULL);
@@ -790,20 +754,20 @@ void setupOTA() {
 // ============================================================================
 void publishHomeAssistantDiscovery() {
   Serial.println("📡 Publishing Home Assistant MQTT Discovery...");
-  
+
   String deviceId = "chester_plumbing";
   String deviceName = "Chester Plumbing System";
-  
+
   // Device configuration (shared by all entities)
   String device = "{\"identifiers\":[\"" + deviceId + "\"],"
                   "\"name\":\"" + deviceName + "\","
                   "\"model\":\"ESP32-S2 Mini\","
                   "\"manufacturer\":\"ChesterTheBus\","
                   "\"sw_version\":\"" + String(FIRMWARE_VERSION) + "\"}";
-  
+
   // Helper lambda for publishing discovery
-  auto publishDiscovery = [&](const char* component, const char* objectId, const char* name, 
-                              const char* stateTopic, const char* deviceClass = nullptr, 
+  auto publishDiscovery = [&](const char* component, const char* objectId, const char* name,
+                              const char* stateTopic, const char* deviceClass = nullptr,
                               const char* unit = nullptr, const char* commandTopic = nullptr,
                               const char* payloadOn = nullptr, const char* payloadOff = nullptr,
                               const char* icon = nullptr) {
@@ -811,40 +775,38 @@ void publishHomeAssistantDiscovery() {
     String payload = "{\"name\":\"" + String(name) + "\","
                      "\"unique_id\":\"" + deviceId + "_" + objectId + "\","
                      "\"state_topic\":\"" + String(stateTopic) + "\"";
-    
+
     if (deviceClass) payload += ",\"device_class\":\"" + String(deviceClass) + "\"";
     if (unit) payload += ",\"unit_of_measurement\":\"" + String(unit) + "\"";
     if (commandTopic) payload += ",\"command_topic\":\"" + String(commandTopic) + "\"";
     if (payloadOn) payload += ",\"payload_on\":\"" + String(payloadOn) + "\"";
     if (payloadOff) payload += ",\"payload_off\":\"" + String(payloadOff) + "\"";
     if (icon) payload += ",\"icon\":\"" + String(icon) + "\"";
-    
+
     payload += ",\"device\":" + device + "}";
-    
+
     client.publish(topic.c_str(), payload.c_str(), true);
     delay(50); // Small delay between discoveries
   };
-  
+
   // Temperature Sensors
-  publishDiscovery("sensor", "hydronic_temp", "Hydronic Temperature", Topic_Hydronic_Temp, "temperature", "°C", nullptr, nullptr, nullptr, "mdi:water-boiler");
-  publishDiscovery("sensor", "fresh_water_temp", "Fresh Water Tank Temperature", Topic_FreshWtr_Temp, "temperature", "°C");
-  publishDiscovery("sensor", "grey_water_temp", "Grey Water Tank Temperature", Topic_GreyWtr_Temp, "temperature", "°C");
-  publishDiscovery("sensor", "return_manifold_temp", "Return Manifold Temperature", Topic_Temp_Return, "temperature", "°C");
-  publishDiscovery("sensor", "ambient_temp", "Ambient Temperature", Topic_Environment_Temp, "temperature", "°C");
-  
+  publishDiscovery("sensor", "hydronic_temp", "Hydronic Temperature", Topic_Hydronic_Temp, "temperature", "°F", nullptr, nullptr, nullptr, "mdi:water-boiler");
+  publishDiscovery("sensor", "fresh_water_temp", "Fresh Tank Temperature", Topic_FreshWtr_Temp, "temperature", "°F");
+  publishDiscovery("sensor", "grey_water_temp", "Grey Tank Temperature", Topic_GreyWtr_Temp, "temperature", "°F");
+  publishDiscovery("sensor", "return_manifold_temp", "Return Manifold Temperature", Topic_Temp_Return, "temperature", "°F");
+  publishDiscovery("sensor", "ambient_temp", "Ambient Temperature", Topic_Environment_Temp, "temperature", "°F");
+
   // Environmental Sensors
   publishDiscovery("sensor", "humidity", "Humidity", Topic_Environment_Humidity, "humidity", "%");
   publishDiscovery("sensor", "pressure", "Atmospheric Pressure", Topic_Environment_Pressure, "pressure", "hPa");
-  
-  // Pump Sensors
-  publishDiscovery("sensor", "pump_pressure", "Hot Water Pump Pressure", Topic_Pump_Pressure, "pressure", "PSI", nullptr, nullptr, nullptr, "mdi:gauge");
-  publishDiscovery("sensor", "pump_speed", "Hot Water Pump Speed", Topic_Pump_Speed, nullptr, "%", nullptr, nullptr, nullptr, "mdi:pump");
-  publishDiscovery("sensor", "pump_status", "Hot Water Pump Status", Topic_Pump_Status, nullptr, nullptr, nullptr, nullptr, nullptr, "mdi:pump");
-  
+
+  // Manifold Pressure Sensor
+  publishDiscovery("sensor", "manifold_pressure", "Manifold Pressure", Topic_Manifold_Pressure, "pressure", "PSI", nullptr, nullptr, nullptr, "mdi:gauge");
+
   // Flow Sensor
   publishDiscovery("sensor", "flow_rate", "Hot Water Flow Rate", Topic_Flow_Rate, nullptr, "L/min", nullptr, nullptr, nullptr, "mdi:water");
   publishDiscovery("sensor", "flow_status", "Hot Water Flow Status", Topic_Flow_Status, nullptr, nullptr, nullptr, nullptr, nullptr, "mdi:water");
-  
+
   // Switches (Valves and Controls)
   publishDiscovery("switch", "fresh_water_heat", "Fresh Water Tank Heater", Topic_FreshWtrHeat_Status, nullptr, nullptr, Topic_FreshWtrHeat_Command, "ON", "OFF", "mdi:water-thermometer");
   publishDiscovery("switch", "grey_water_heat", "Grey Water Tank Heater", Topic_GreyWtrHeat_Status, nullptr, nullptr, Topic_GreyWtrHeat_Command, "ON", "OFF", "mdi:water-thermometer");
@@ -854,29 +816,81 @@ void publishHomeAssistantDiscovery() {
   publishDiscovery("switch", "exhaust_fan", "Exhaust Fan", Topic_ExhaustFan_Status, nullptr, nullptr, Topic_ExhaustFan_Command, "ON", "OFF", "mdi:fan");
   publishDiscovery("switch", "main_pump", "Main Water Pump", Topic_MainPump_Status, nullptr, nullptr, Topic_MainPump_Command, "ON", "OFF", "mdi:pump");
   publishDiscovery("switch", "domestic_hw", "Domestic Hot Water", Topic_DomesticHW_Status, nullptr, nullptr, Topic_DomesticHW_Command, "OPEN", "CLOSE", "mdi:water-boiler");
-  
-  // Diesel Heater (select entity for 3-state control)
-  String heaterTopic = String("homeassistant/select/") + deviceId + "/diesel_heater/config";
-  String heaterPayload = "{\"name\":\"Diesel Heater\","
-                         "\"unique_id\":\"" + deviceId + "_diesel_heater\","
-                         "\"state_topic\":\"" + String(Topic_DieselHtr_Status) + "\","
-                         "\"command_topic\":\"" + String(Topic_DieselHtr_Command) + "\","
-                         "\"options\":[\"OFF\",\"PUMP ONLY\",\"HIGH\"],"
-                         "\"icon\":\"mdi:fire\","
-                         "\"device\":" + device + "}";
-  client.publish(heaterTopic.c_str(), heaterPayload.c_str(), true);
+
+  // Diesel Heater (simple on/off switch)
+  publishDiscovery("switch", "diesel_heater", "Diesel Heater", Topic_DieselHtr_Status, nullptr, nullptr, Topic_DieselHtr_Command, "ON", "OFF", "mdi:fire");
+
+  // Remove old select discovery entity (publish empty retained message to clean up)
+  String oldHeaterSelectTopic = String("homeassistant/select/") + deviceId + "/diesel_heater/config";
+  client.publish(oldHeaterSelectTopic.c_str(), "", true);
   delay(50);
-  
-  // Binary Sensors (Alerts)
-  publishDiscovery("binary_sensor", "freeze_warning", "Freeze Warning", Topic_Alert_Freeze_Warning, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:snowflake-alert");
-  publishDiscovery("binary_sensor", "high_temp_alert", "High Temperature Alert", Topic_Alert_High_Temp, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:thermometer-alert");
-  publishDiscovery("binary_sensor", "system_error", "System Error", Topic_Alert_System_Error, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:alert-circle");
-  publishDiscovery("binary_sensor", "pump_error", "Pump Error", Topic_Alert_Pump_Error, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:pump-off");
-  publishDiscovery("binary_sensor", "high_humidity_alert", "High Humidity Alert (Leak Detection)", Topic_Alert_High_Humidity, nullptr, nullptr, nullptr, "ON", "OFF", "mdi:water-alert");
-  
+
+  // Electric Heater (simple on/off switch)
+  publishDiscovery("switch", "electric_heater", "Electric Heater", Topic_ElectricHtr_Status, nullptr, nullptr, Topic_ElectricHtr_Command, "ON", "OFF", "mdi:radiator");
+
+  // Alerts
+  publishDiscovery("sensor", "plumbing_alerts", "Plumbing Alerts", Topic_Alert, nullptr, nullptr, nullptr, nullptr, nullptr, "mdi:alert-circle");
+
   // Cabinet Lock
   publishDiscovery("lock", "cabinet_lock", "Rear Pass Cabinet Lock", Topic_CabLock_Status, nullptr, nullptr, Topic_CabLock_Command, "LOCK", "UNLOCK", "mdi:lock");
-  
+
+  // Exhaust Fan Temperature Setpoint (number entity)
+  String fanSetTopic = String("homeassistant/number/") + deviceId + "/exhaust_fan_temp_set/config";
+  String fanSetPayload = "{\"name\":\"Exhaust Fan Temperature Setpoint\","
+                        "\"unique_id\":\"" + deviceId + "_exhaust_fan_temp_set\","
+                        "\"state_topic\":\"" + String(Topic_ExhaustFan_TempSet) + "\","
+                        "\"command_topic\":\"" + String(Topic_ExhaustFan_TempSetCmd) + "\","
+                        "\"min\":32.0,"
+                        "\"max\":140.0,"
+                        "\"step\":1.0,"
+                        "\"unit_of_measurement\":\"°F\","
+                        "\"icon\":\"mdi:fan\","
+                        "\"device\":" + device + "}";
+  client.publish(fanSetTopic.c_str(), fanSetPayload.c_str(), true);
+  delay(50);
+
+  // Plumbing Mode (select: AUTO / MANUAL)
+  String modeTopic = String("homeassistant/select/") + deviceId + "/plumbing_mode/config";
+  String modePayload = "{\"name\":\"Plumbing Mode\","
+                     "\"unique_id\":\"" + deviceId + "_plumbing_mode\","
+                     "\"state_topic\":\"" + String(Topic_Plumbing_Mode) + "\","
+                     "\"command_topic\":\"" + String(Topic_Plumbing_ModeCmd) + "\","
+                     "\"options\":[\"AUTO\",\"MANUAL\"],"
+                     "\"icon\":\"mdi:settings\","
+                     "\"device\":" + device + "}";
+  client.publish(modeTopic.c_str(), modePayload.c_str(), true);
+  delay(50);
+
+  // Fresh Water Heater Temperature Setpoint
+  String freshTempTopic = String("homeassistant/number/") + deviceId + "/fresh_water_temp_set/config";
+  String freshTempPayload = "{\"name\":\"Fresh Water Heater Setpoint\","
+                            "\"unique_id\":\"" + deviceId + "_fresh_water_temp_set\","
+                            "\"state_topic\":\"" + String(Topic_FreshWtrHeat_TempSet) + "\","
+                            "\"command_topic\":\"" + String(Topic_FreshWtrHeat_TempSetCmd) + "\","
+                            "\"min\":32.0,"
+                            "\"max\":120.0,"
+                            "\"step\":1.0,"
+                            "\"unit_of_measurement\":\"°F\","
+                            "\"icon\":\"mdi:thermometer\","
+                            "\"device\":" + device + "}";
+  client.publish(freshTempTopic.c_str(), freshTempPayload.c_str(), true);
+  delay(50);
+
+  // Grey Water Heater Temperature Setpoint
+  String greyTempTopic = String("homeassistant/number/") + deviceId + "/grey_water_temp_set/config";
+  String greyTempPayload = "{\"name\":\"Grey Water Heater Setpoint\","
+                           "\"unique_id\":\"" + deviceId + "_grey_water_temp_set\","
+                           "\"state_topic\":\"" + String(Topic_GreyWtrHeat_TempSet) + "\","
+                           "\"command_topic\":\"" + String(Topic_GreyWtrHeat_TempSetCmd) + "\","
+                           "\"min\":32.0,"
+                           "\"max\":120.0,"
+                           "\"step\":1.0,"
+                           "\"unit_of_measurement\":\"°F\","
+                           "\"icon\":\"mdi:thermometer\","
+                           "\"device\":" + device + "}";
+  client.publish(greyTempTopic.c_str(), greyTempPayload.c_str(), true);
+  delay(50);
+
   Serial.println("✓ Home Assistant Discovery published for Plumbing System");
 }
 
@@ -911,11 +925,24 @@ void reconnectMQTT() {
 
   Serial.print("Connecting to MQTT...");
   // Use existing credentials (empty strings accepted)
-  if (client.connect(mqtt_client_id, mqtt_user, mqtt_password)) {
+  // Set Last Will message so broker marks us OFFLINE on unexpected disconnect
+  if (client.connect(mqtt_client_id, mqtt_user, mqtt_password, Topic_Plumbing_Status, 1, true, "OFFLINE")) {
     Serial.println(" connected!");
     mqttFailCount = 0;
+    // Announce ONLINE (retained) so Home Assistant and other systems see us
+    client.publish(Topic_Plumbing_Status, "ONLINE", true);
     publishHomeAssistantDiscovery();
     subscribeToTopics();
+
+    // Publish board's authoritative states to broker
+    publishAllStatesToBroker();
+
+    // Publish plumbing mode and current setpoints so HA sees them
+    client.publish(Topic_Plumbing_Mode, plumbingMode.c_str(), true);
+    char fwStr[8]; dtostrf(freshWaterTempTarget, 4, 1, fwStr); client.publish(Topic_FreshWtrHeat_TempSet, fwStr, true);
+    char gwStr[8]; dtostrf(greyWaterTempTarget, 4, 1, gwStr); client.publish(Topic_GreyWtrHeat_TempSet, gwStr, true);
+    char fanStr[8]; dtostrf(exhaustFanTempSet, 4, 1, fanStr); client.publish(Topic_ExhaustFan_TempSet, fanStr, true);
+
     publishHealth();
     publishStatus();
   } else {
@@ -934,25 +961,20 @@ void subscribeToTopics() {
   client.subscribe(Topic_EngineLoop_Command);
   client.subscribe(Topic_FrontLoop_Command);
   client.subscribe(Topic_DieselHtr_Command);
+  client.subscribe(Topic_ElectricHtr_Command);
 
-  // Modes
-  client.subscribe(Topic_FreshWtrHeat_Mode);
-  client.subscribe(Topic_GreyWtrHeat_Mode);
-  client.subscribe(Topic_ExhaustFan_Mode);
+  // Global mode
+  client.subscribe(Topic_Plumbing_ModeCmd);
 
-  // Configuration
-  client.subscribe(Topic_FreshWtrHeat_TempSet);
-  client.subscribe(Topic_GreyWtrHeat_TempSet);
-  client.subscribe(Topic_ExhaustFan_TempHigh);
-  client.subscribe(Topic_ExhaustFan_TempLow);
+  // Configuration - Subscribe to COMMAND topics (separate from state topics)
+  // This prevents the retained message loop while allowing HA to send commands
+  client.subscribe(Topic_FreshWtrHeat_TempSetCmd);
+  client.subscribe(Topic_GreyWtrHeat_TempSetCmd);
+  client.subscribe(Topic_ExhaustFan_TempSetCmd);
 
   // Cabinet lock
   client.subscribe(Topic_CabLock_Command);
   client.subscribe(Topic_AllLock_Command);
-
-  // Pump control
-  client.subscribe(Topic_Pump_Command);
-  client.subscribe(Topic_Pump_SetPoint);
 
   // Main water pump and domestic HW loop
   client.subscribe(Topic_MainPump_Command);
@@ -989,38 +1011,58 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   else if (topicStr == Topic_FreshWtrHeat_Command) {
     controlFreshWaterHeater(message == "ON");
   }
-  else if (topicStr == Topic_FreshWtrHeat_Mode) {
-    freshWaterMode = message;
-  }
-  else if (topicStr == Topic_FreshWtrHeat_TempSet) {
-    freshWaterTempTarget = message.toFloat();
-    saveConfigToPreferences();
+  else if (topicStr == Topic_FreshWtrHeat_TempSetCmd) {
+    float newTemp = message.toFloat();
+    // Validate temperature range
+    if (newTemp >= 32.0 && newTemp <= 120.0) {
+      freshWaterTempTarget = newTemp;
+      saveConfigToPreferences();
+      // Publish new state to state topic
+      char tempStr[8];
+      dtostrf(freshWaterTempTarget, 4, 1, tempStr);
+      client.publish(Topic_FreshWtrHeat_TempSet, tempStr, true);
+      Serial.print("🌡️ Fresh Water setpoint updated: ");
+      Serial.print(freshWaterTempTarget);
+      Serial.println(" °F");
+    }
   }
   // Grey water heater
   else if (topicStr == Topic_GreyWtrHeat_Command) {
     controlGreyWaterHeater(message == "ON");
   }
-  else if (topicStr == Topic_GreyWtrHeat_Mode) {
-    greyWaterMode = message;
-  }
-  else if (topicStr == Topic_GreyWtrHeat_TempSet) {
-    greyWaterTempTarget = message.toFloat();
-    saveConfigToPreferences();
+  else if (topicStr == Topic_GreyWtrHeat_TempSetCmd) {
+    float newTemp = message.toFloat();
+    // Validate temperature range
+    if (newTemp >= 32.0 && newTemp <= 120.0) {
+      greyWaterTempTarget = newTemp;
+      saveConfigToPreferences();
+      // Publish new state to state topic
+      char tempStr[8];
+      dtostrf(greyWaterTempTarget, 4, 1, tempStr);
+      client.publish(Topic_GreyWtrHeat_TempSet, tempStr, true);
+      Serial.print("🌡️ Grey Water setpoint updated: ");
+      Serial.print(greyWaterTempTarget);
+      Serial.println(" °F");
+    }
   }
   // Exhaust fan
   else if (topicStr == Topic_ExhaustFan_Command) {
     controlExhaustFan(message == "ON");
   }
-  else if (topicStr == Topic_ExhaustFan_Mode) {
-    exhaustFanMode = message;
-  }
-  else if (topicStr == Topic_ExhaustFan_TempHigh) {
-    exhaustFanTempHigh = message.toFloat();
-    saveConfigToPreferences();
-  }
-  else if (topicStr == Topic_ExhaustFan_TempLow) {
-    exhaustFanTempLow = message.toFloat();
-    saveConfigToPreferences();
+  else if (topicStr == Topic_ExhaustFan_TempSetCmd) {
+    float newTemp = message.toFloat();
+    // Validate temperature range
+    if (newTemp >= 32.0 && newTemp <= 140.0) {
+      exhaustFanTempSet = newTemp;
+      saveConfigToPreferences();
+      // Publish new state to state topic
+      char tempStr[8];
+      dtostrf(exhaustFanTempSet, 4, 1, tempStr);
+      client.publish(Topic_ExhaustFan_TempSet, tempStr, true);
+      Serial.print("🌬️ Exhaust fan setpoint updated: ");
+      Serial.print(exhaustFanTempSet);
+      Serial.println(" °F");
+    }
   }
   // Valves
   else if (topicStr == Topic_RearLoop_Command) {
@@ -1033,7 +1075,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       engineLoopMqttRequest = newState;
       preferences.putBool("engLoopMqtt", engineLoopMqttRequest);  // Persist to EEPROM
       Serial.print("Engine Loop MQTT: ");
-      Serial.print(newState ? "OPEN" : "CLOSED");
+      Serial.print(newState ? "OPEN" : "CLOSE");
       Serial.println(" (saved)");
     }
     controlEngineLoopValve(newState);
@@ -1045,21 +1087,24 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       frontLoopMqttRequest = newState;
       preferences.putBool("frtLoopMqtt", frontLoopMqttRequest);  // Persist to EEPROM
       Serial.print("Front Loop MQTT: ");
-      Serial.print(newState ? "OPEN" : "CLOSED");
+      Serial.print(newState ? "OPEN" : "CLOSE");
       Serial.println(" (saved)");
     }
     controlFrontLoopValve(newState);
   }
-  // Diesel heater
+  // Diesel heater (simple on/off)
   else if (topicStr == Topic_DieselHtr_Command) {
-    if (message == "OFF") controlDieselHeater(0);
-    else if (message == "PUMP ONLY") controlDieselHeater(1);
-    else if (message == "HIGH") controlDieselHeater(2);
+    controlDieselHeater(message == "ON");
+  }
+  // Electric heater
+  else if (topicStr == Topic_ElectricHtr_Command) {
+    controlElectricHeater(message == "ON");
   }
   // Main water pump
   else if (topicStr == Topic_MainPump_Command) {
-    if (message == "ON") controlMainWaterPump(true);
-    else if (message == "OFF") controlMainWaterPump(false);
+    // Accept START/STOP primarily (header comment). Allow ON/OFF as backward compat.
+    if (message == "START" || message == "ON") controlMainWaterPump(true);
+    else if (message == "STOP" || message == "OFF") controlMainWaterPump(false);
   }
   // Domestic hot water loop
   else if (topicStr == Topic_DomesticHW_Command) {
@@ -1072,59 +1117,34 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       if (highHumidityAlarmActive) {
         Serial.println("🔓 High humidity alarm MANUALLY CLEARED");
         highHumidityAlarmActive = false;
-        client.publish(Topic_Alert_High_Humidity, "CLEARED");
-        client.publish(Topic_Pump_Status, "OK");
+        humiditySpikePending = false;  // Also clear any pending spike detection
+        baselineHumidity = -999.0;
+        refreshAlertPublish();
+        // Alert state refreshed
         // Reset humidity baseline
         lastHumidity = environmentHumidity;
         lastHumidityCheck = millis();
       }
     }
   }
-  // Pump control
-  else if (topicStr == Topic_Pump_Command) {
-    if (message == "ON") {
-      // Don't allow manual start if high humidity alarm is active
-      if (highHumidityAlarmActive) {
-        Serial.println("⚠️ Cannot start pump: High humidity alarm active!");
-        client.publish(Topic_Pump_Status, "BLOCKED_HIGH_HUMIDITY");
-        return;
-      }
 
-      pumpMode = "MANUAL";  // Switch to manual mode
-      lastManualPumpControl = millis();  // Reset inactivity timer
-      pumpRunning = true;
-      pumpAutoStarted = false;
-      pumpAlarm = false;
-      pumpAlarmReason = "";
-      pumpStartTime = millis();
-
-      // Publish status immediately
-      client.publish(Topic_Pump_Status, "RUNNING", true);
-      client.publish("HotWaterPumpMode", "MANUAL");
-      Serial.println("💧 Hot Water Pump: MANUAL START (auto-revert in 30s)");
-
-    } else if (message == "OFF") {
-      pumpMode = "MANUAL";  // Switch to manual mode
-      lastManualPumpControl = millis();  // Reset inactivity timer
-      pumpRunning = false;
-      pumpAutoStarted = false;
-      controlPump(0);
-
-      // Publish status immediately
-      client.publish(Topic_Pump_Status, "STOPPED", true);
-      client.publish("HotWaterPumpMode", "MANUAL");
-      Serial.println("💧 Hot Water Pump: MANUAL STOP (auto-revert in 30s)");
-    } else if (message == "AUTO") {
-      pumpMode = "AUTO";
-      client.publish("HotWaterPumpMode", "AUTO");
-      Serial.println("💧 Hot Water Pump: AUTO MODE enabled");
-      // Let handleAutoPump() manage the pump state
+  // Global plumbing mode (AUTO / MANUAL)
+  else if (topicStr == Topic_Plumbing_ModeCmd) {
+    if (message == "AUTO" || message == "MANUAL") {
+      plumbingMode = message;
+      saveConfigToPreferences();
+      // Publish new state to state topic
+      client.publish(Topic_Plumbing_Mode, plumbingMode.c_str(), true);
+      Serial.print("⚙️ Plumbing mode set to: ");
+      Serial.println(plumbingMode);
+    } else {
+      Serial.println("⚠️ Invalid Plumbing Mode (use AUTO or MANUAL)");
     }
   }
 }
 
 // ============================================================================
-// PRESSURE SENSOR & PID CONTROL
+// PRESSURE SENSOR
 // ============================================================================
 float readPressure() {
   // Read analog voltage (0-3.3V on ESP32-S2, 12-bit ADC = 0-4095)
@@ -1153,59 +1173,6 @@ float readPressure() {
   return psi;
 }
 
-void controlPump(float speedPercent) {
-  static bool wasPumpRunning = false;
-
-  // If speed is below minimum threshold, shut pump off completely
-  if (speedPercent > 0.0 && speedPercent < PUMP_MIN_SPEED) {
-    pumpSpeed = 0.0;
-    Serial.print("⚠️ Pump speed below ");
-    Serial.print(PUMP_MIN_SPEED, 0);
-    Serial.print("% (");
-    Serial.print(speedPercent, 1);
-    Serial.println("%) - shutting off");
-  } else {
-    pumpSpeed = constrain(speedPercent, 0.0, 100.0);
-  }
-
-  // Detect pump shutdown and trigger pressure relief
-  // Only open valve if ALL loops are closed (no flow path open)
-  if (wasPumpRunning && pumpSpeed == 0.0) {
-    bool allLoopsClosed = !rearLoopOpen && !engineLoopOpen && !frontLoopOpen && !greyWaterHeaterOn;
-
-    if (allLoopsClosed) {
-      Serial.println("💨 Pump stopped (all loops closed) - opening DHW valve for pressure relief");
-      pressureReliefActive = true;
-      pressureReliefStartTime = millis();
-      controlDHWSolinoid(true);  // Open valve to release pressure
-    } else {
-      Serial.println("💨 Pump stopped but loops are open - skipping pressure relief");
-    }
-  }
-
-  wasPumpRunning = (pumpSpeed > 0.0);
-
-  // Convert 0-100% to 0-255 PWM
-  int pwmValue = map((int)(pumpSpeed * 10), 0, 1000, 0, 255);
-  pwmValue = constrain(pwmValue, 0, 255);
-
-  // Write PWM value to pump controller
-  ledcWrite(PUMP_PWM_CHANNEL, pwmValue);
-
-  // Publish pump speed (every 2 seconds)
-  static unsigned long lastPubTime = 0;
-  if (millis() - lastPubTime >= 2000) {
-    lastPubTime = millis();
-
-    char speedStr[8];
-    dtostrf(pumpSpeed, 4, 1, speedStr);
-    client.publish(Topic_Pump_Speed, speedStr);
-
-    char pressureStr[8];
-    dtostrf(currentPressure, 4, 1, pressureStr);
-    client.publish(Topic_Pump_Pressure, pressureStr);
-  }
-}
 
 // ============================================================================
 // FLOW SENSOR
@@ -1290,228 +1257,85 @@ void publishFlowRate() {
 }
 
 // ============================================================================
-// AUTOMATIC PUMP CONTROL
-// ============================================================================
-bool shouldPumpBeRunning() {
-  // SAFETY: Never run pump if high humidity alarm is active
-  if (highHumidityAlarmActive) {
-    return false;
-  }
-
-  // Instant start for flow detection
-  if (flowDetected) {
-    return true;
-  }
-
-  // For valves, only start pump after 10-minute delay is complete
-  if (greyWaterHeaterOn && greyLoopDelayComplete) {
-    return true;
-  }
-  if (rearLoopOpen && rearLoopDelayComplete) {
-    return true;
-  }
-  if (engineLoopOpen && engineLoopDelayComplete) {
-    return true;
-  }
-  if (frontLoopOpen && frontLoopDelayComplete) {
-    return true;
-  }
-
-  return false;
-}
-
-void handleAutoPump() {
-  if (pumpMode != "AUTO") return;  // Only run in AUTO mode
-
-  unsigned long currentTime = millis();
-
-  // Update loop delay timers
-  if (rearLoopOpen) {
-    if (rearLoopOpenTime == 0) {
-      rearLoopOpenTime = currentTime;
-      Serial.println("🕐 Rear loop opened - starting 10-minute timer");
-    }
-    if (!rearLoopDelayComplete && (currentTime - rearLoopOpenTime >= LOOP_DELAY_TIME)) {
-      rearLoopDelayComplete = true;
-      Serial.println("✓ Rear loop 10-minute delay complete - will add pressure boost");
-    }
-  } else {
-    rearLoopOpenTime = 0;
-    rearLoopDelayComplete = false;
-  }
-
-  if (engineLoopOpen) {
-    if (engineLoopOpenTime == 0) {
-      engineLoopOpenTime = currentTime;
-      Serial.println("🕐 Engine loop opened - starting 10-minute timer");
-    }
-    if (!engineLoopDelayComplete && (currentTime - engineLoopOpenTime >= LOOP_DELAY_TIME)) {
-      engineLoopDelayComplete = true;
-      Serial.println("✓ Engine loop 10-minute Delay complete - will add pressure boost");
-    }
-  } else {
-    engineLoopOpenTime = 0;
-    engineLoopDelayComplete = false;
-  }
-
-  if (frontLoopOpen) {
-    if (frontLoopOpenTime == 0) {
-      frontLoopOpenTime = currentTime;
-      Serial.println("🕐 Front loop opened - starting 10-minute timer");
-    }
-    if (!frontLoopDelayComplete && (currentTime - frontLoopOpenTime >= LOOP_DELAY_TIME)) {
-      frontLoopDelayComplete = true;
-      Serial.println("✓ Front loop 10-minute Delay complete - will add pressure boost");
-    }
-  } else {
-    frontLoopOpenTime = 0;
-    frontLoopDelayComplete = false;
-  }
-
-  if (greyWaterHeaterOn) {
-    if (greyLoopOpenTime == 0) {
-      greyLoopOpenTime = currentTime;
-      Serial.println("🕐 Grcdey loop opened - starting 10-minute timer");
-    }
-    if (!greyLoopDelayComplete && (currentTime - greyLoopOpenTime >= LOOP_DELAY_TIME)) {
-      greyLoopDelayComplete = true;
-      Serial.println("✓ Grey loop 10-minute Delay complete - will add pressure boost");
-    }
-  } else {
-    greyLoopOpenTime = 0;
-    greyLoopDelayComplete = false;
-  }
-
-  bool pumpShouldRun = shouldPumpBeRunning();
-
-  // Start pump if needed and not running
-  if (pumpShouldRun && !pumpRunning) {
-    pumpRunning = true;
-    pumpAutoStarted = true;
-    pumpAlarm = false;
-    pumpAlarmReason = "";
-    pumpStartTime = millis();
-
-    Serial.print("⚙️ AUTO START: Pump starting because ");
-    if (flowDetected) Serial.print("flow detected (INSTANT) ");
-    if (greyWaterHeaterOn) {
-      Serial.print("grey-water-heater ");
-      if (greyLoopDelayComplete) Serial.print("(boost active) ");
-      else Serial.print("(waiting for boost) ");
-    }
-    if (rearLoopOpen) {
-      Serial.print("rear-loop ");
-      if (rearLoopDelayComplete) Serial.print("(boost active) ");
-      else Serial.print("(waiting for boost) ");
-    }
-    if (engineLoopOpen) {
-      Serial.print("engine-loop ");
-      if (engineLoopDelayComplete) Serial.print("(boost active) ");
-      else Serial.print("(waiting for boost) ");
-    }
-    if (frontLoopOpen) {
-      Serial.print("front-loop ");
-      if (frontLoopDelayComplete) Serial.print("(boost active) ");
-      else Serial.print("(waiting for boost) ");
-    }
-    Serial.println();
-
-    client.publish(Topic_Pump_Status, "RUNNING", true);
-    // Start at appropriate speed based on condition
-    float startSpeed = flowDetected ? PUMP_SPEED_FLOW_DETECTED : PUMP_SPEED_LOOPS_OPEN;
-    controlPump(startSpeed);
-  }
-  // Stop pump if not needed and currently running (and was auto-started)
-  else if (!pumpShouldRun && pumpRunning && pumpAutoStarted) {
-    Serial.println("⚙️ AUTO STOP: Pump stopping (no valves open, no flow)");
-    pumpRunning = false;
-    pumpAutoStarted = false;
-    controlPump(0);
-    client.publish(Topic_Pump_Status, "STOPPED", true);
-  }
-}
-
-void checkPumpSafety() {
-  if (!pumpRunning) {
-    // If pump is stopped and alarm is set, clear it if pressure is back in safe range
-    if (pumpAlarm && currentPressure >= PRESSURE_MIN_ALARM && currentPressure <= PRESSURE_MAX_ALARM) {
-      Serial.println("✓ Pump alarm cleared - pressure back to safe range");
-      pumpAlarm = false;
-      pumpAlarmReason = "";
-      client.publish(Topic_Pump_Status, "OK");
-      client.publish(Topic_Alert_Pump_Error, "CLEARED");
-    }
-    return;
-  }
-
-  // Allow startup grace period for pressure to build
-  unsigned long pumpRunDuration = millis() - pumpStartTime;
-  if (pumpRunDuration < PUMP_STARTUP_GRACE_PERIOD) {
-    // Still in startup period - don't check pressure alarms yet
-    return;
-  }
-
-  // Check if pressure is out of safe range
-  if (currentPressure < PRESSURE_MIN_ALARM) {
-    if (!pumpAlarm) {  // Only trigger alarm once
-      pumpAlarm = true;
-      pumpAlarmReason = "PRESSURE_LOW";
-      pumpRunning = false;
-      controlPump(0);
-
-      Serial.println("⚠️ PUMP ALARM: Pressure below 2 PSI!");
-      client.publish(Topic_Alert_Pump_Error, "PRESSURE_LOW");
-      client.publish(Topic_Pump_Status, "ALARM_LOW_PRESSURE");
-    }
-  }
-  else if (currentPressure > PRESSURE_MAX_ALARM) {
-    if (!pumpAlarm) {  // Only trigger alarm once
-      pumpAlarm = true;
-      pumpAlarmReason = "PRESSURE_HIGH";
-      pumpRunning = false;
-      controlPump(0);
-
-      Serial.println("⚠️ PUMP ALARM: Pressure above threshold!");
-      Serial.println("💨 Opening DHW valve for emergency pressure relief");
-
-      // Emergency pressure relief - open DHW valve
-      controlDHWSolinoid(true);
-      pressureReliefActive = true;
-      pressureReliefStartTime = millis();
-
-      client.publish(Topic_Alert_Pump_Error, "PRESSURE_HIGH");
-      client.publish(Topic_Pump_Status, "ALARM_HIGH_PRESSURE");
-    }
-  }
-  else if (pumpAlarm) {
-    // Clear alarm if pressure returns to safe range
-    Serial.println("✓ Pump alarm auto-cleared - pressure back to safe range");
-    pumpAlarm = false;
-    pumpAlarmReason = "";
-    client.publish(Topic_Pump_Status, "OK");
-    client.publish(Topic_Alert_Pump_Error, "CLEARED");
-  }
-}
-
-// ============================================================================
 // TEMPERATURE SENSORS
 // ============================================================================
+// Helper function to calculate moving average
+float calculateTempAverage(float* buffer) {
+  float sum = 0.0;
+  int validCount = 0;
+
+  for (int i = 0; i < TEMP_FILTER_SIZE; i++) {
+    if (buffer[i] > -999.0) {  // Only count valid readings
+      sum += buffer[i];
+      validCount++;
+    }
+  }
+
+  if (validCount == 0) return -999.0;
+  return sum / validCount;
+}
+
 void readTemperatures() {
+  // Request temperatures from all sensors on shared bus
   tempSensors.requestTemperatures();
 
   float tempC;
 
-  tempC = tempSensors.getTempCByIndex(SENSOR_HYDRONIC);
+  // DEBUG: Read all 4 indices and log them for sensor identification
+  static unsigned long lastDebugLog = 0;
+  if (client.connected() && (millis() - lastDebugLog) > 30000) {  // Log every 30 seconds
+    lastDebugLog = millis();
+    char debugStr[8];
+
+    for (int i = 0; i < 4; i++) {
+      tempC = tempSensors.getTempCByIndex(i);
+      float tempF = (tempC != DEVICE_DISCONNECTED_C) ? (tempC * 9.0 / 5.0) + 32.0 : -999.0;
+      dtostrf(tempF, 5, 1, debugStr);
+
+      String debugTopic = "Debug/SensorIndex_" + String(i);
+      client.publish(debugTopic.c_str(), debugStr);
+    }
+  }
+
+  // Index 0: Return manifold (no filtering - usually stable)
+  tempC = tempSensors.getTempCByIndex(0);
+  returnManifoldTemp = (tempC != DEVICE_DISCONNECTED_C) ? (tempC * 9.0 / 5.0) + 32.0 : -999.0;
+
+  // Index 1: Hydronic temperature (no filtering needed - usually stable)
+  tempC = tempSensors.getTempCByIndex(1);
   hydronicTemp = (tempC != DEVICE_DISCONNECTED_C) ? (tempC * 9.0 / 5.0) + 32.0 : -999.0;
 
-  tempC = tempSensors.getTempCByIndex(SENSOR_FRESH_WATER);
-  freshWaterTemp = (tempC != DEVICE_DISCONNECTED_C) ? (tempC * 9.0 / 5.0) + 32.0 : -999.0;
+  // Index 2: Grey water temperature with filtering
+  tempC = tempSensors.getTempCByIndex(2);
+  float greyWaterRaw = (tempC != DEVICE_DISCONNECTED_C) ? (tempC * 9.0 / 5.0) + 32.0 : -999.0;
 
-  tempC = tempSensors.getTempCByIndex(SENSOR_GREY_WATER);
-  greyWaterTemp = (tempC != DEVICE_DISCONNECTED_C) ? (tempC * 9.0 / 5.0) + 32.0 : -999.0;
+  // Add to circular buffer
+  greyWaterTempBuffer[tempBufferIndex] = greyWaterRaw;
 
-  tempC = tempSensors.getTempCByIndex(SENSOR_RETURN_MANIFOLD);
-  returnManifoldTemp = (tempC != DEVICE_DISCONNECTED_C) ? (tempC * 9.0 / 5.0) + 32.0 : -999.0;
+  // Calculate filtered value
+  if (tempFilterInitialized || tempBufferIndex >= TEMP_FILTER_SIZE - 1) {
+    greyWaterTemp = calculateTempAverage(greyWaterTempBuffer);
+    tempFilterInitialized = true;
+  } else {
+    greyWaterTemp = greyWaterRaw;  // Use raw until buffer fills
+  }
+
+  // Index 3: Fresh water temperature with filtering
+  tempC = tempSensors.getTempCByIndex(3);
+  float freshWaterRaw = (tempC != DEVICE_DISCONNECTED_C) ? (tempC * 9.0 / 5.0) + 32.0 : -999.0;
+
+  // Add to circular buffer
+  freshWaterTempBuffer[tempBufferIndex] = freshWaterRaw;
+
+  // Calculate filtered value
+  if (tempFilterInitialized || tempBufferIndex >= TEMP_FILTER_SIZE - 1) {
+    freshWaterTemp = calculateTempAverage(freshWaterTempBuffer);
+  } else {
+    freshWaterTemp = freshWaterRaw;  // Use raw until buffer fills
+  }
+
+  // Increment buffer index (circular)
+  tempBufferIndex = (tempBufferIndex + 1) % TEMP_FILTER_SIZE;
 }
 
 void publishTemperatures() {
@@ -1542,67 +1366,98 @@ void readBME280() {
   if (!bmeAvailable) return;
 
   float tempC = bme.readTemperature();
+  // Convert BME Celsius to Fahrenheit for internal state and publishing
   environmentTemp = (tempC * 9.0 / 5.0) + 32.0;
   float newHumidity = bme.readHumidity();
   environmentPressure = bme.readPressure() / 100.0F;
 
-  // Check for sudden humidity spike (possible leak detection)
+  // Check for sudden humidity spike (possible leak detection) with spike filtering
   unsigned long currentTime = millis();
   if (lastHumidity > 0 && !highHumidityAlarmActive) {
     float humidityChange = newHumidity - lastHumidity;
     float timeDelta = (currentTime - lastHumidityCheck) / 1000.0;  // seconds
 
-    // Detect rapid humidity increase
-    if (humidityChange > HUMIDITY_SPIKE_THRESHOLD && timeDelta < 60.0) {
-      Serial.println("\n⚠️⚠️⚠️ HIGH HUMIDITY ALARM ⚠️⚠️⚠️");
-      Serial.print("Humidity spike detected: +");
+    // ---- SPIKE FILTERING LOGIC ----
+    // When spike first detected: store baseline and start timer
+    if (!humiditySpikePending && humidityChange > HUMIDITY_SPIKE_THRESHOLD && timeDelta < 60.0) {
+      baselineHumidity = lastHumidity;
+      spikeDetectedTime = currentTime;
+      humiditySpikePending = true;
+
+      Serial.println("\n🔍 Humidity spike detected (pending confirmation)...");
+      Serial.print("Spike: +");
       Serial.print(humidityChange, 1);
-      Serial.print("% in ");
-      Serial.print(timeDelta, 0);
-      Serial.println(" seconds");
-      Serial.println("POSSIBLE WATER LEAK - Emergency shutdown!");
+      Serial.print("% (from ");
+      Serial.print(baselineHumidity, 1);
+      Serial.print("% to ");
+      Serial.print(newHumidity, 1);
+      Serial.println("%)");
+      Serial.println("Waiting for recovery or confirmation...");
+    }
 
-      highHumidityAlarmActive = true;
+    // If spike is pending, check for recovery or confirmation
+    if (humiditySpikePending) {
+      unsigned long spikeDuration = currentTime - spikeDetectedTime;
+      float recoveryThreshold = baselineHumidity + HUMIDITY_SPIKE_TOLERANCE;
 
-      // EMERGENCY SHUTDOWN
-      // Stop pump immediately
-      if (pumpRunning) {
-        pumpRunning = false;
-        pumpAutoStarted = false;
-        controlPump(0);
-        Serial.println("🛑 Pump STOPPED");
+      // Check if humidity has returned to near-baseline (spike was transient)
+      if (newHumidity <= recoveryThreshold) {
+        Serial.println("✓ Humidity spike filtered: sensor returned to baseline (transient glitch)");
+        Serial.print("Recovery time: ");
+        Serial.print(spikeDuration / 1000.0, 1);
+        Serial.println(" seconds");
+        humiditySpikePending = false;
+        baselineHumidity = -999.0;
       }
+      // Timeout: if spike hasn't recovered in 30 seconds, treat as real leak
+      else if (spikeDuration > SPIKE_RECOVERY_TIMEOUT) {
+        Serial.println("\n⚠️⚠️⚠️ HIGH HUMIDITY ALARM (CONFIRMED) ⚠️⚠️⚠️");
+        Serial.print("Humidity spike persisted for ");
+        Serial.print(spikeDuration / 1000.0, 1);
+        Serial.println(" seconds - treating as real leak");
+        Serial.println("POSSIBLE WATER LEAK - Emergency shutdown!");
 
-      // Close all loop valves
-      if (rearLoopOpen) {
-        controlRearLoopValve(false);
-        Serial.println("🛑 Rear loop CLOSED");
-      }
-      if (engineLoopOpen) {
-        controlEngineLoopValve(false);
-        engineLoopMqttRequest = false;
-        preferences.putBool("engLoopMqtt", false);
-        Serial.println("🛑 Engine loop CLOSED");
-      }
-      if (frontLoopOpen) {
-        controlFrontLoopValve(false);
-        frontLoopMqttRequest = false;
-        preferences.putBool("frtLoopMqtt", false);
-        Serial.println("🛑 Front loop CLOSED");
-      }
-      if (greyWaterHeaterOn) {
-        controlGreyWaterHeater(false);
-        Serial.println("🛑 Grey water heater CLOSED");
-      }
+        highHumidityAlarmActive = true;
+        humiditySpikePending = false;
 
-      // Publish alerts
-      client.publish(Topic_Alert_High_Humidity, "ACTIVE - High Humidity, Possible Leak", true);
-      client.publish(Topic_Pump_Status, "ALARM_HIGH_HUMIDITY", true);
-      client.publish(Topic_Plumbing_Status, "LEAK_DETECTED_SHUTDOWN", true);
+        // EMERGENCY SHUTDOWN
+        // Pump is controlled externally; firmware cannot stop the pump. Raise alert and secure valves.
+        Serial.println("🛑 Pump control is external - raising alert and securing system");
 
-      Serial.println("\nSystem locked. Send MQTT command to clear:");
-      Serial.println("Topic: ClearHighHumidityCommand");
-      Serial.println("Message: clear\n");
+        // Close all loop valves
+        if (rearLoopOpen) {
+          controlRearLoopValve(false);
+          Serial.println("🛑 Rear loop CLOSE");
+        }
+        if (engineLoopOpen) {
+          controlEngineLoopValve(false);
+          engineLoopMqttRequest = false;
+          preferences.putBool("engLoopMqtt", false);
+          Serial.println("🛑 Engine loop CLOSE");
+        }
+        if (frontLoopOpen) {
+          controlFrontLoopValve(false);
+          frontLoopMqttRequest = false;
+          preferences.putBool("frtLoopMqtt", false);
+          Serial.println("🛑 Front loop CLOSE");
+        }
+        if (greyWaterHeaterOn) {
+          controlGreyWaterHeater(false);
+          Serial.println("🛑 Grey water heater CLOSE");
+        }
+        if (mainWaterPumpOn) {
+          controlMainWaterPump(false);
+          Serial.println("🛑 Main water pump OFF");
+        }
+
+        // Publish alerts
+        publishAlertRaw("High Humidity - possible leak");
+        client.publish(Topic_Plumbing_Status, "LEAK_DETECTED_SHUTDOWN", true);
+
+        Serial.println("\nSystem locked. Send MQTT command to clear:");
+        Serial.println("Topic: ClearHighHumidityCommand");
+        Serial.println("Message: clear\n");
+      }
     }
   }
 
@@ -1621,7 +1476,7 @@ void publishBME280() {
   client.publish(Topic_Environment_Temp, tempStr);
 
   dtostrf(environmentHumidity, 4, 2, tempStr);
-  client.publish(Topic_Environment_Humidity, tempStr);
+   client.publish(Topic_Environment_Humidity, tempStr);
 
   dtostrf(environmentPressure, 6, 2, tempStr);
   client.publish(Topic_Environment_Pressure, tempStr);
@@ -1633,6 +1488,7 @@ void publishBME280() {
 void controlFreshWaterHeater(bool turnOn) {
   digitalWrite(FRESH_WATER_HEATER_PIN, turnOn ? LOW : HIGH);
   freshWaterHeaterOn = turnOn;
+  saveValveStatesToEEPROM();
   client.publish(Topic_FreshWtrHeat_Status, turnOn ? "ON" : "OFF", true);
   Serial.print("🔥 Fresh Water Heater: ");
   Serial.println(turnOn ? "ON" : "OFF");
@@ -1641,6 +1497,7 @@ void controlFreshWaterHeater(bool turnOn) {
 void controlGreyWaterHeater(bool turnOn) {
   digitalWrite(GREY_WATER_HEATER_PIN, turnOn ? LOW : HIGH);
   greyWaterHeaterOn = turnOn;
+  saveValveStatesToEEPROM();
   client.publish(Topic_GreyWtrHeat_Status, turnOn ? "ON" : "OFF", true);
   Serial.print("🔥 Grey Water Heater: ");
   Serial.println(turnOn ? "ON" : "OFF");
@@ -1649,6 +1506,7 @@ void controlGreyWaterHeater(bool turnOn) {
 void controlExhaustFan(bool turnOn) {
   digitalWrite(EXHAUST_FAN_PIN, turnOn ? LOW : HIGH);
   exhaustFanOn = turnOn;
+  saveValveStatesToEEPROM();
   client.publish(Topic_ExhaustFan_Status, turnOn ? "ON" : "OFF", true);
   Serial.print("💨 Exhaust Fan: ");
   Serial.println(turnOn ? "ON" : "OFF");
@@ -1657,75 +1515,82 @@ void controlExhaustFan(bool turnOn) {
 void controlRearLoopValve(bool open) {
   digitalWrite(REAR_LOOP_VALVE_PIN, open ? LOW : HIGH);
   rearLoopOpen = open;
-  client.publish(Topic_RearLoop_Status, open ? "OPEN" : "CLOSED", true);
+  saveValveStatesToEEPROM();
+  client.publish(Topic_RearLoop_Status, open ? "OPEN" : "CLOSE", true);
   Serial.print("🌊 Rear Loop: ");
-  Serial.println(open ? "OPEN" : "CLOSED");
+  Serial.println(open ? "OPEN" : "CLOSE");
 }
 
 void controlEngineLoopValve(bool open) {
   digitalWrite(ENGINE_LOOP_VALVE_PIN, open ? LOW : HIGH);
   engineLoopOpen = open;
-  client.publish(Topic_EngineLoop_Status, open ? "OPEN" : "CLOSED", true);
+  saveValveStatesToEEPROM();
+  client.publish(Topic_EngineLoop_Status, open ? "OPEN" : "CLOSE", true);
   Serial.print("🌊 Engine Loop: ");
-  Serial.println(open ? "OPEN" : "CLOSED");
+  Serial.println(open ? "OPEN" : "CLOSE");
 }
 
 void controlFrontLoopValve(bool open) {
   digitalWrite(FRONT_LOOP_VALVE_PIN, open ? LOW : HIGH);
   frontLoopOpen = open;
-  client.publish(Topic_FrontLoop_Status, open ? "OPEN" : "CLOSED", true);
+  saveValveStatesToEEPROM();
+  client.publish(Topic_FrontLoop_Status, open ? "OPEN" : "CLOSE", true);
   Serial.print("🌊 Front Loop: ");
-  Serial.println(open ? "OPEN" : "CLOSED");
+  Serial.println(open ? "OPEN" : "CLOSE");
 }
 
 void controlMainWaterPump(bool turnOn) {
   // Normally closed relay: HIGH (relay OFF) = pump ON, LOW (relay ON) = pump OFF
   digitalWrite(MAIN_WATER_PUMP_PIN, turnOn ? HIGH : LOW);
   mainWaterPumpOn = turnOn;
+  saveValveStatesToEEPROM();
   client.publish(Topic_MainPump_Status, turnOn ? "ON" : "OFF", true);
   Serial.print("💧 Main Water Pump: ");
-  Serial.println(turnOn ? "ON" : "OFF");
+  Serial.println(turnOn ? "RUN" : "STOP");
 }
 
 void controlDHWSolinoid(bool open) {
   digitalWrite(DOMESTIC_HW_SOLINOID_PIN, open ? LOW : HIGH);
   DHWSolinoidOpen = open;
-  client.publish(Topic_DomesticHW_Status, open ? "OPEN" : "CLOSED", true);
+  saveValveStatesToEEPROM();
+  client.publish(Topic_DomesticHW_Status, open ? "OPEN" : "CLOSE", true);
   Serial.print("🔥 Domestic Hot Water Loop: ");
-  Serial.println(open ? "OPEN" : "CLOSED");
+  Serial.println(open ? "OPEN" : "CLOSE");
 }
 
-void controlDieselHeater(int state) {
-  // state: 0=OFF, 1=MID, 2=HIGH
+void controlDieselHeater(bool turnOn) {
+  // Simple ON/OFF control
   // ACTIVE LOW RELAYS: LOW = relay energized (circuit ON), HIGH = relay off (circuit OFF)
   // Pin 1 (DIESEL_HEATER_PIN) = White wire (Circuit 1)
   // Pin 2 (DIESEL_HEATER_2_PIN) = Blue wire (Circuit 2)
   // Pin 3 (DIESEL_HEATER_3_PIN) = Yellow wire (Circuit 3)
 
-  if (state == 0) {
+  if (turnOn) {
+    // ON: Pins 1&3 LOW, Pin 2 HIGH (circuits 1 & 3 ON, circuit 2 OFF)
+    digitalWrite(DIESEL_HEATER_PIN, LOW);
+    digitalWrite(DIESEL_HEATER_2_PIN, HIGH);
+    digitalWrite(DIESEL_HEATER_3_PIN, LOW);
+  } else {
     // OFF: All pins HIGH (all relays off, circuits disabled)
     digitalWrite(DIESEL_HEATER_PIN, HIGH);
     digitalWrite(DIESEL_HEATER_2_PIN, HIGH);
     digitalWrite(DIESEL_HEATER_3_PIN, HIGH);
-    client.publish(Topic_DieselHtr_Status, "OFF", true);
-  } else if (state == 1) {
-    // MID: Pins 1&2 LOW, Pin 3 HIGH (circuits 1 & 2 ON, circuit 3 OFF)
-    digitalWrite(DIESEL_HEATER_PIN, LOW);
-    digitalWrite(DIESEL_HEATER_2_PIN, LOW);
-    digitalWrite(DIESEL_HEATER_3_PIN, HIGH);
-    client.publish(Topic_DieselHtr_Status, "PUMP ONLY", true);
-  } else {
-    // HIGH: Pins 1&3 LOW, Pin 2 HIGH (circuits 1 & 3 ON, circuit 2 OFF)
-    digitalWrite(DIESEL_HEATER_PIN, LOW);
-    digitalWrite(DIESEL_HEATER_2_PIN, HIGH);
-    digitalWrite(DIESEL_HEATER_3_PIN, LOW);
-    client.publish(Topic_DieselHtr_Status, "HIGH", true);
   }
-  dieselHeaterState = state;
+  dieselHeaterOn = turnOn;
+  saveValveStatesToEEPROM();
+  client.publish(Topic_DieselHtr_Status, turnOn ? "ON" : "OFF", true);
   Serial.print("🔥 Diesel Heater: ");
-  if (state == 0) Serial.println("OFF");
-  else if (state == 1) Serial.println("PUMP ONLY");
-  else Serial.println("HIGH");
+  Serial.println(turnOn ? "ON" : "OFF");
+}
+
+void controlElectricHeater(bool turnOn) {
+  // Electric heater on pin 37: HIGH = ON, LOW = OFF
+  digitalWrite(ELECTRIC_HEATER_PIN, turnOn ? HIGH : LOW);
+  electricHeaterOn = turnOn;
+  saveValveStatesToEEPROM();
+  client.publish(Topic_ElectricHtr_Status, turnOn ? "ON" : "OFF", true);
+  Serial.print("⚡ Electric Heater: ");
+  Serial.println(turnOn ? "ON" : "OFF");
 }
 
 // ============================================================================
@@ -1743,6 +1608,7 @@ void lockCabinet() {
 
   lockServo.detach();
 
+  saveValveStatesToEEPROM();
   client.publish(Topic_CabLock_Status, "LOCKED", true);
   Serial.println("🔒 Cabinet: LOCKED");
 }
@@ -1759,6 +1625,7 @@ void unlockCabinet() {
 
   lockServo.detach();
 
+  saveValveStatesToEEPROM();
   client.publish(Topic_CabLock_Status, "UNLOCKED", true);
   Serial.println("🔓 Cabinet: UNLOCKED");
 }
@@ -1784,8 +1651,8 @@ void processLockCommand(String command) {
 // CRITICAL AUTOMATION
 // ============================================================================
 void handleCriticalAutomation() {
-  // Fresh water tank heater automation
-  if (freshWaterMode == "AUTO") {
+  // Fresh water tank heater automation (only when global plumbing mode is AUTO)
+  if (plumbingMode == "AUTO") {
     if (freshWaterTemp > -999.0) {
       if (freshWaterTemp < freshWaterTempTarget && !freshWaterHeaterOn) {
         controlFreshWaterHeater(true);
@@ -1795,8 +1662,8 @@ void handleCriticalAutomation() {
     }
   }
 
-  // Grey water tank heater automation
-  if (greyWaterMode == "AUTO") {
+  // Grey water tank heater automation (only when global plumbing mode is AUTO)
+  if (plumbingMode == "AUTO") {
     if (greyWaterTemp > -999.0) {
       if (greyWaterTemp < greyWaterTempTarget && !greyWaterHeaterOn) {
         controlGreyWaterHeater(true);
@@ -1806,18 +1673,21 @@ void handleCriticalAutomation() {
     }
   }
 
-  // Exhaust fan automation - temperature control
-  if (exhaustFanMode == "AUTO" && bmeAvailable) {
+  // Exhaust fan automation - temperature control using adjustable setpoint
+  if (plumbingMode == "AUTO" && bmeAvailable) {
     if (environmentTemp > -999.0) {
-      // Turn on fan if temp exceeds 100°F
-      if (environmentTemp >= 100.0 && !exhaustFanOn) {
+      if (environmentTemp >= exhaustFanTempSet && !exhaustFanOn) {
         controlExhaustFan(true);
-        Serial.println("🌡️ Exhaust fan ON - Temperature above 100°F");
+        Serial.print("🌡️ Exhaust fan ON - Temperature above ");
+        Serial.print(exhaustFanTempSet);
+        Serial.println("°F");
       }
-      // Turn off fan if temp drops below 95°F (5° hysteresis)
-      else if (environmentTemp < 95.0 && exhaustFanOn) {
+      // Hysteresis of 2°F
+      else if (environmentTemp < (exhaustFanTempSet - 3.0) && exhaustFanOn) {
         controlExhaustFan(false);
-        Serial.println("🌡️ Exhaust fan OFF - Temperature below 95°F");
+        Serial.print("🌡️ Exhaust fan OFF - Temperature below ");
+        Serial.print(exhaustFanTempSet - 3.0);
+        Serial.println("°F");
       }
     }
   }
@@ -1831,11 +1701,11 @@ void checkAlerts() {
 
   if (freezeCondition && !freezeWarningActive) {
     freezeWarningActive = true;
-    client.publish(Topic_Alert_Freeze_Warning, "ACTIVE");
+    publishAlertRaw("Tank Freeze Warning ACTIVE");
     Serial.println("⚠️ FREEZE WARNING!");
   } else if (!freezeCondition && freezeWarningActive) {
     freezeWarningActive = false;
-    client.publish(Topic_Alert_Freeze_Warning, "CLEAR");
+    refreshAlertPublish();
   }
 
   // High temperature warning
@@ -1844,11 +1714,11 @@ void checkAlerts() {
 
   if (highTempCondition && !highTempWarningActive) {
     highTempWarningActive = true;
-    client.publish(Topic_Alert_High_Temp, "ACTIVE");
+    publishAlertRaw("High Hydronic Tank Temp ACTIVE");
     Serial.println("⚠️ HIGH TEMPERATURE WARNING!");
   } else if (!highTempCondition && highTempWarningActive) {
     highTempWarningActive = false;
-    client.publish(Topic_Alert_High_Temp, "CLEAR");
+    refreshAlertPublish();
   }
 }
 
@@ -1857,13 +1727,45 @@ void checkAlerts() {
 // ============================================================================
 void publishStatus() {
   // All valve states already published by control functions with retained flag
-  // Pump status
-  const char* pumpStatus = pumpAlarm ? pumpAlarmReason.c_str() : (pumpRunning ? "RUNNING" : "STOPPED");
-  client.publish(Topic_Pump_Status, pumpStatus);
+  // Publish manifold pressure
+  char pressureStr[8];
+  dtostrf(manifoldPressure, 4, 1, pressureStr);
+  client.publish(Topic_Manifold_Pressure, pressureStr, true);
 
   // Publish main water pump and domestic HW loop initial states
   client.publish(Topic_MainPump_Status, mainWaterPumpOn ? "ON" : "OFF", true);
-  client.publish(Topic_DomesticHW_Status, DHWSolinoidOpen ? "OPEN" : "CLOSED", true);
+  client.publish(Topic_DomesticHW_Status, DHWSolinoidOpen ? "OPEN" : "CLOSE", true);
+
+  // Publish plumbing mode and setpoints so HA sees them on reconnect
+  client.publish(Topic_Plumbing_Mode, plumbingMode.c_str(), true);
+  char fwStr[8]; dtostrf(freshWaterTempTarget, 4, 1, fwStr); client.publish(Topic_FreshWtrHeat_TempSet, fwStr, true);
+  char gwStr[8]; dtostrf(greyWaterTempTarget, 4, 1, gwStr); client.publish(Topic_GreyWtrHeat_TempSet, gwStr, true);
+  char fanStr[8]; dtostrf(exhaustFanTempSet, 4, 1, fanStr); client.publish(Topic_ExhaustFan_TempSet, fanStr, true);
+}
+
+// ============================================================================
+// ALERT HELPERS
+// Centralize alert publishing so Topic_Alert shows the latest active alert
+// or "OKAY" when no alerts are active.
+// ============================================================================
+String lastAlert = "OKAY";
+
+void publishAlertRaw(const String &msg) {
+  lastAlert = msg;
+  client.publish(Topic_Alert, lastAlert.c_str(), true);
+}
+
+void refreshAlertPublish() {
+  // Priority: high humidity > high temp > freeze warning > OKAY
+  if (highHumidityAlarmActive) {
+    publishAlertRaw("High Humidity - possible leak");
+  } else if (highTempWarningActive) {
+    publishAlertRaw("High Hydronic Tank Temp ACTIVE");
+  } else if (freezeWarningActive) {
+    publishAlertRaw("Tank Freeze Warning ACTIVE");
+  } else {
+    publishAlertRaw("OKAY");
+  }
 }
 
 void publishHealth() {
@@ -1872,7 +1774,7 @@ void publishHealth() {
   snprintf(uptimeStr, sizeof(uptimeStr), "%lu", uptime);
   client.publish(Topic_Plumbing_Uptime, uptimeStr);
 
-  client.publish(Topic_Plumbing_Status, "ONLINE");
+  client.publish(Topic_Plumbing_Status, "ONLINE", true);
   client.publish(Topic_Firmware_Version, FIRMWARE_VERSION);
 
   Serial.print("📊 Uptime: ");
@@ -1886,16 +1788,16 @@ void publishHealth() {
 void saveConfigToPreferences() {
   preferences.putFloat("fwTarget", freshWaterTempTarget);
   preferences.putFloat("gwTarget", greyWaterTempTarget);
-  preferences.putFloat("fanHigh", exhaustFanTempHigh);
-  preferences.putFloat("fanLow", exhaustFanTempLow);
+  preferences.putFloat("fanSet", exhaustFanTempSet);
+  preferences.putString("plumbingMode", plumbingMode);
   Serial.println("💾 Configuration saved");
 }
 
 void loadConfigFromPreferences() {
   freshWaterTempTarget = preferences.getFloat("fwTarget", 40.0);
   greyWaterTempTarget = preferences.getFloat("gwTarget", 35.0);
-  exhaustFanTempHigh = preferences.getFloat("fanHigh", 85.0);
-  exhaustFanTempLow = preferences.getFloat("fanLow", 75.0);
+  exhaustFanTempSet = preferences.getFloat("fanSet", 85.0);
+  plumbingMode = preferences.getString("plumbingMode", "AUTO");
 
   // Restore loop request states (MQTT commands from GIGA/thermostat)
   engineLoopMqttRequest = preferences.getBool("engLoopMqtt", false);
@@ -1906,25 +1808,130 @@ void loadConfigFromPreferences() {
   Serial.println(engineLoopMqttRequest ? "OPEN" : "CLOSE");
   Serial.print("  Front Loop MQTT Request: ");
   Serial.println(frontLoopMqttRequest ? "OPEN" : "CLOSE");
+  Serial.print("  Plumbing Mode: ");
+  Serial.println(plumbingMode);
+  Serial.print("  Exhaust Fan Setpoint: ");
+  Serial.print(exhaustFanTempSet);
+  Serial.println(" °F");
 }
 
-void restoreValveStates() {
-  // Restore physical valve positions to match saved MQTT request states
-  Serial.println("\n🔄 Restoring valve states from EEPROM...");
+// ============================================================================
+// EEPROM STATE MANAGEMENT (Board is Authoritative)
+// ============================================================================
+// Deferred write: mark dirty and flush after debounce to reduce flash wear.
+bool eepromDirty = false;
+unsigned long eepromDirtyTime = 0;
+const unsigned long EEPROM_DEBOUNCE_MS = 2000;  // Wait 2s after last change before writing
 
-  if (engineLoopMqttRequest) {
-    controlEngineLoopValve(true);
-    Serial.println("  ✓ Engine loop restored to OPEN");
+void saveValveStatesToEEPROM() {
+  // Mark dirty - actual write happens in flushEEPROM() called from loop()
+  eepromDirty = true;
+  eepromDirtyTime = millis();
+}
+
+void flushEEPROM() {
+  if (!eepromDirty) return;
+  if (millis() - eepromDirtyTime < EEPROM_DEBOUNCE_MS) return;
+
+  eepromDirty = false;
+  preferences.putBool("freshHeat", freshWaterHeaterOn);
+  preferences.putBool("greyHeat", greyWaterHeaterOn);
+  preferences.putBool("exhaustFan", exhaustFanOn);
+  preferences.putBool("rearLoop", rearLoopOpen);
+  preferences.putBool("engineLoop", engineLoopOpen);
+  preferences.putBool("frontLoop", frontLoopOpen);
+  preferences.putBool("dieselHtr", dieselHeaterOn);
+  preferences.putBool("electricHtr", electricHeaterOn);
+  preferences.putBool("mainPump", mainWaterPumpOn);
+  preferences.putBool("dhwSolenoid", DHWSolinoidOpen);
+  preferences.putBool("cabLock", currentLockState == STATE_LOCKED);
+  Serial.println("💾 Valve states saved to EEPROM");
+}
+
+void restoreValveStatesFromEEPROM() {
+  Serial.println("\n🔄 Restoring valve states from EEPROM (AUTHORITATIVE)...");
+
+  // Restore state variables from EEPROM
+  freshWaterHeaterOn = preferences.getBool("freshHeat", false);
+  greyWaterHeaterOn = preferences.getBool("greyHeat", false);
+  exhaustFanOn = preferences.getBool("exhaustFan", false);
+  rearLoopOpen = preferences.getBool("rearLoop", false);
+  engineLoopOpen = preferences.getBool("engineLoop", false);
+  frontLoopOpen = preferences.getBool("frontLoop", false);
+  dieselHeaterOn = preferences.getBool("dieselHtr", false);
+  electricHeaterOn = preferences.getBool("electricHtr", false);
+  mainWaterPumpOn = preferences.getBool("mainPump", true);  // Default ON
+  DHWSolinoidOpen = preferences.getBool("dhwSolenoid", false);
+  bool savedLockState = preferences.getBool("cabLock", false);  // Default UNLOCKED
+
+  // Apply restored states to physical hardware (active LOW relays)
+  digitalWrite(FRESH_WATER_HEATER_PIN, freshWaterHeaterOn ? LOW : HIGH);
+  digitalWrite(GREY_WATER_HEATER_PIN, greyWaterHeaterOn ? LOW : HIGH);
+  digitalWrite(EXHAUST_FAN_PIN, exhaustFanOn ? LOW : HIGH);
+  digitalWrite(REAR_LOOP_VALVE_PIN, rearLoopOpen ? LOW : HIGH);
+  digitalWrite(ENGINE_LOOP_VALVE_PIN, engineLoopOpen ? LOW : HIGH);
+  digitalWrite(FRONT_LOOP_VALVE_PIN, frontLoopOpen ? LOW : HIGH);
+  digitalWrite(MAIN_WATER_PUMP_PIN, mainWaterPumpOn ? HIGH : LOW);
+  digitalWrite(DOMESTIC_HW_SOLINOID_PIN, DHWSolinoidOpen ? LOW : HIGH);
+
+  // Electric heater: HIGH = ON, LOW = OFF
+  digitalWrite(ELECTRIC_HEATER_PIN, electricHeaterOn ? HIGH : LOW);
+
+  // Restore diesel heater state (simple on/off)
+  if (dieselHeaterOn) {
+    // ON: Pins 1&3 LOW, Pin 2 HIGH
+    digitalWrite(DIESEL_HEATER_PIN, LOW);
+    digitalWrite(DIESEL_HEATER_2_PIN, HIGH);
+    digitalWrite(DIESEL_HEATER_3_PIN, LOW);
+  } else {
+    // OFF: All pins HIGH
+    digitalWrite(DIESEL_HEATER_PIN, HIGH);
+    digitalWrite(DIESEL_HEATER_2_PIN, HIGH);
+    digitalWrite(DIESEL_HEATER_3_PIN, HIGH);
   }
 
-  if (frontLoopMqttRequest) {
-    controlFrontLoopValve(true);
-    Serial.println("  ✓ Front loop restored to OPEN");
+  // Restore cabinet lock position
+  if (savedLockState) {
+    lockServo.setPeriodHertz(50);
+    lockServo.attach(SERVO_PIN, 500, 2400);
+    lockServo.write(LOCKED_POSITION);
+    currentLockState = STATE_LOCKED;
+    delay(500);
+    lockServo.detach();
+  } else {
+    // Already unlocked from setup init, just update state
+    currentLockState = STATE_UNLOCKED;
   }
 
-  if (!engineLoopMqttRequest && !frontLoopMqttRequest) {
-    Serial.println("  ℹ️ All loops closed (default state)");
-  }
+  Serial.println("  ✓ Hardware relays restored from EEPROM");
+  Serial.println("  Fresh Water Heater: " + String(freshWaterHeaterOn ? "ON" : "OFF"));
+  Serial.println("  Grey Water Heater: " + String(greyWaterHeaterOn ? "ON" : "OFF"));
+  Serial.println("  Exhaust Fan: " + String(exhaustFanOn ? "ON" : "OFF"));
+  Serial.println("  Rear Loop: " + String(rearLoopOpen ? "OPEN" : "CLOSE"));
+  Serial.println("  Engine Loop: " + String(engineLoopOpen ? "OPEN" : "CLOSE"));
+  Serial.println("  Front Loop: " + String(frontLoopOpen ? "OPEN" : "CLOSE"));
+  Serial.println("  Diesel Heater: " + String(dieselHeaterOn ? "ON" : "OFF"));
+  Serial.println("  Electric Heater: " + String(electricHeaterOn ? "ON" : "OFF"));
+  Serial.println("  Main Water Pump: " + String(mainWaterPumpOn ? "ON" : "OFF"));
+  Serial.println("  Domestic HW: " + String(DHWSolinoidOpen ? "OPEN" : "CLOSE"));
+  Serial.println("  Cabinet Lock: " + String(currentLockState == STATE_LOCKED ? "LOCKED" : "UNLOCKED"));
+  Serial.println("✓ Board is now AUTHORITATIVE source\n");
+}
 
-  Serial.println("✓ Valve states synchronized with MQTT status\n");
+void publishAllStatesToBroker() {
+  Serial.println("📡 Publishing authoritative states to MQTT broker...");
+
+  // Publish all current states with retained flag
+  client.publish(Topic_FreshWtrHeat_Status, freshWaterHeaterOn ? "ON" : "OFF", true);
+  client.publish(Topic_GreyWtrHeat_Status, greyWaterHeaterOn ? "ON" : "OFF", true);
+  client.publish(Topic_ExhaustFan_Status, exhaustFanOn ? "ON" : "OFF", true);
+  client.publish(Topic_RearLoop_Status, rearLoopOpen ? "OPEN" : "CLOSE", true);
+  client.publish(Topic_EngineLoop_Status, engineLoopOpen ? "OPEN" : "CLOSE", true);
+  client.publish(Topic_FrontLoop_Status, frontLoopOpen ? "OPEN" : "CLOSE", true);
+  client.publish(Topic_MainPump_Status, mainWaterPumpOn ? "ON" : "OFF", true);
+  client.publish(Topic_DomesticHW_Status, DHWSolinoidOpen ? "OPEN" : "CLOSE", true);
+  client.publish(Topic_DieselHtr_Status, dieselHeaterOn ? "ON" : "OFF", true);
+  client.publish(Topic_ElectricHtr_Status, electricHeaterOn ? "ON" : "OFF", true);
+
+  Serial.println("✓ Broker synchronized with board's authoritative state");
 }

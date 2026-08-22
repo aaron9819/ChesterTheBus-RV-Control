@@ -1,245 +1,113 @@
-# Over-The-Air (OTA) Update Guide - ChesterTheBus RV Control
+# Flashing and OTA Updates
 
-## Overview
-All D1 Mini cabinet lock controllers now support OTA (Over-The-Air) firmware updates over WiFi. This means you can update the firmware wirelessly without physically connecting a USB cable to each board.
+Every board in the system runs `ArduinoOTA` and can be updated over WiFi. All boards share
+the OTA password `Chester2025`.
 
-## OTA Configuration
+## OTA target table
 
-### Hostnames & Credentials
-All boards are configured with the following OTA settings:
+| Project | Board | OTA hostname | Port | Configured in `platformio.ini`? |
+|---|---|---|---|---|
+| `Plumbing` | ESP32-S2 Mini | `Plumbing.local` | 3232 | yes |
+| `FrontThermostat` | ESP32-S2 Mini | `Thermostat-KitchenPassSide.local` | 3232 | yes |
+| `AltInverterCharger` | ESP32-S2 Mini | `AltInverterCharger.local` | 3232 | yes |
+| `HX-Bypass` | D1 Mini | `HX-Bypass.local` | 8266 | **no — commented out** |
+| `D1Mini_CabLock_KitchenDriverSide` | D1 Mini Lite | `CabLock-KitchenDriverSide.local` | 8266 | yes |
+| `D1Mini_CabLock_KitchenUpperPassSide` | D1 Mini Lite | `CabLock-KitchenUpperPassSide.local` | 8266 | yes |
+| `D1Mini_CabLock_RearDriverSide` | D1 Mini Lite | `CabLock-RearDriverSide.local` | 8266 | yes |
 
-| Board | OTA Hostname | Password |
-|-------|--------------|----------|
-| **Kitchen Driver Side** | `CabLock-KitchenDriverSide.local` | `Chester2025` |
-| **Kitchen Pass Side** | `CabLock-KitchenPassSide.local` | `Chester2025` |
-| **Rear Driver Side** | `CabLock-RearDriverSide.local` | `Chester2025` |
-| **D1 Plumbing** | `D1Mini-Plumbing.local` | `Chester2025` |
+ESP8266 boards use OTA port 8266; ESP32 boards use 3232. Both are the platform defaults.
 
-### Firmware Version
-Current firmware version for all cabinet locks: **v1.1.0**
+The firmware on every board enables OTA at runtime regardless of what `platformio.ini` says
+— the `upload_protocol` lines only control which transport `pio run -t upload` uses.
+HX-Bypass ships with those lines commented, so its default upload path is USB even though
+the running firmware is listening for OTA.
 
-## How to Update Firmware via OTA
+## Uploading
 
-### Method 1: PlatformIO Command Line (Recommended)
-
-1. **Make sure the board is powered on and connected to WiFi**
-   - Check serial monitor or MQTT status to confirm connection
-
-2. **Navigate to the project folder** in terminal:
-   ```bash
-   cd /Users/aaronlapp/Desktop/ChesterTheBus-RV-Control/D1Mini_CabLock_KitchenDriverSide
-   ```
-
-3. **Upload firmware via OTA**:
-   ```bash
-   pio run --target upload --upload-port CabLock-KitchenDriverSide.local
-   ```
-
-4. **Monitor progress** (optional):
-   ```bash
-   pio device monitor
-   ```
-
-### Method 2: PlatformIO VS Code Extension
-
-1. Open the project folder in VS Code
-2. Click the PlatformIO icon in the left sidebar
-3. Under PROJECT TASKS, expand your environment (e.g., `d1_mini_lite`)
-4. Click **Platform** → **Upload (OTA)**
-5. Select the target device from the list
-
-### Method 3: Manual Upload with esptool.py
+For a project whose `platformio.ini` already has the OTA block active, an upload is just:
 
 ```bash
-# Build the firmware first
-pio run
-
-# Upload via OTA
-python -m esptool --chip esp8266 --port CabLock-KitchenDriverSide.local write_flash 0x00000 .pio/build/d1_mini_lite/firmware.bin
+pio run -t upload
 ```
 
-## OTA Update Behavior
+To force USB on such a project, comment out the three `upload_*` blocks at the bottom of
+its `platformio.ini` first, or override on the command line:
 
-### During OTA Update:
-- ✅ Board accepts incoming firmware
-- ✅ Servo is automatically detached for safety
-- ✅ Progress is displayed in serial monitor (every 10%)
-- ✅ LED may blink during update
-- ⏸️ MQTT commands are **NOT** processed during update
+```bash
+pio run -t upload --upload-port /dev/cu.usbmodem101
+```
 
-### After Successful Update:
-- ✅ Board automatically reboots
-- ✅ Reconnects to WiFi
-- ✅ Reconnects to MQTT broker
-- ✅ Publishes status messages
-- ✅ Ready to receive commands
+For HX-Bypass, uncomment its `upload_protocol` / `upload_port` / `upload_flags` block to
+switch it to OTA.
 
-### If OTA Update Fails:
-- ⚠️ Board continues running old firmware
-- ⚠️ Error message printed to serial monitor
-- ⚠️ No reboot occurs
-- ✅ Normal operation resumes immediately
+## First flash must be USB
 
-## Troubleshooting
+A board with no firmware has no OTA listener. Any newly built or reflashed-from-blank board
+gets its first upload over USB, after which OTA works.
 
-### "Device not found" error
-**Problem:** PlatformIO can't find the device on the network
+On the Lolin S2 Mini, entering the bootloader means holding **0** while tapping **RST**,
+then releasing 0. The board reappears as a new serial device.
 
-**Solutions:**
-1. Verify board is powered on and WiFi connected
-2. Check that you're on the same network (Chester IOT)
-3. Try using the IP address instead of hostname:
-   ```bash
-   pio run --target upload --upload-port 192.168.8.XXX
-   ```
-4. Restart the board and wait 30 seconds for WiFi/mDNS to initialize
-5. Ping the hostname to verify network connectivity:
-   ```bash
-   ping CabLock-KitchenDriverSide.local
-   ```
+## Serial monitor
 
-### "Authentication failed" error
-**Problem:** OTA password is incorrect
-
-**Solution:**
-- Verify the password is set correctly in `platformio.ini`:
-  ```ini
-  upload_flags =
-    --auth=Chester2025
-  ```
-
-### "Upload timeout" error
-**Problem:** Network connection interrupted during upload
-
-**Solutions:**
-1. Move closer to the WiFi router (GL-AR300M16)
-2. Check WiFi signal strength in serial monitor
-3. Temporarily stop other network-heavy operations
-4. Retry the upload
-
-### Board stuck in boot loop after OTA
-**Problem:** New firmware has a critical bug
-
-**Solution:**
-1. Connect via USB cable
-2. Upload working firmware via serial:
-   ```bash
-   pio run --target upload
-   ```
-3. Board will recover and run the working firmware
-
-## Safety Features
-
-### Automatic Safeguards During OTA:
-- 🔒 Servo motors are detached (locks stay in current position)
-- 🔒 No MQTT commands accepted during update
-- 🔒 If update fails, board returns to normal operation
-
-### Critical Automation (D1 Plumbing only):
-- 🚨 During OTA, **ALL relays are disabled** for safety
-- 🚨 Tank heaters, exhaust fan, and other relays are turned OFF
-- ✅ After successful OTA, automation resumes automatically
-
-## Best Practices
-
-1. **Test First**: Always test new firmware on one board before updating all boards
-2. **Good Signal**: Ensure strong WiFi signal before starting OTA update
-3. **Power Stability**: Make sure board has stable power during update
-4. **Version Control**: Always update `FIRMWARE_VERSION` define when making changes
-5. **Backup**: Keep a working firmware `.bin` file for emergency recovery
-6. **Update One at a Time**: Don't try to update multiple boards simultaneously
-7. **Monitor Serial**: Watch serial output during first OTA update to verify success
-
-## Finding Board IP Addresses
-
-### Via Serial Monitor:
 ```bash
 pio device monitor
 ```
-Look for: `IP address: 192.168.8.XXX`
 
-### Via MQTT:
-Subscribe to status topics and check for connection messages
+All boards are 115200 baud (set via `monitor_speed`). Boot output identifies the firmware
+version, the discovered sensors, and the restored relay states, which is the fastest way to
+confirm a flash took.
 
-### Via Router:
-1. Log into GL-AR300M16 at http://192.168.8.1
-2. Go to **Clients** page
-3. Look for devices named "CabLock_*"
+## What each board does during an update
 
-## Updating All Cabinet Locks Script
+- **Plumbing** — sets `otaInProgress`, which suspends the entire MQTT/sensor/automation
+  section of `loop()`, and detaches the 60 s task watchdog so a slow upload cannot trigger
+  a panic reset. The watchdog is reattached on completion *and* on the error path.
+- **AltInverterCharger** — forces the relay open and clears `relayPulsing` before the
+  update starts, so an update landing mid-pulse cannot leave the inverter's power button
+  held down. `loop()` returns early while `otaInProgress` is set.
+- **Cabinet locks** — detach the servo if attached, so it is not driven during the update.
+- **FrontThermostat, HX-Bypass** — no special handling; they simply serve the update.
 
-Create a shell script to update all locks sequentially:
+## Relay and valve state across a reflash
+
+Only the Plumbing board restores its outputs after a restart. It reads every relay state
+back out of NVS in `setup()` and reapplies it to the hardware before MQTT even connects, so
+an OTA update does not disturb an active heating loop.
+
+Everything else comes up in a defined default state:
+
+| Board | State after reboot |
+|---|---|
+| Plumbing | All relays restored from NVS; setpoints and mode restored |
+| FrontThermostat | Mode and setpoint restored from EEPROM; fan off, engine loop assumed closed |
+| AltInverterCharger | Voltage calibration restored from EEPROM; relay open |
+| HX-Bypass | **Nothing persisted** — auto mode on, 160 °F setpoint, valve closed |
+| Cabinet locks | **Nothing persisted** — servo driven to UNLOCKED at boot |
+
+Reflashing a cabinet lock therefore unlocks it. Reflashing HX-Bypass discards a custom
+setpoint. Both are worth knowing before an update while the vehicle is in use.
+
+## Troubleshooting
+
+**`.local` hostname does not resolve.** mDNS on the GL-iNet router is unreliable when
+clients roam. Upload to the IP instead:
 
 ```bash
-#!/bin/bash
-# update-all-locks.sh
-
-echo "🔄 Updating all cabinet locks via OTA..."
-
-cd "/Users/aaronlapp/Desktop/ChesterTheBus-RV-Control"
-
-echo ""
-echo "📦 1/3 - Updating Kitchen Driver Side..."
-cd "D1Mini_CabLock_KitchenDriverSide"
-pio run --target upload --upload-port CabLock-KitchenDriverSide.local
-if [ $? -eq 0 ]; then
-    echo "✅ Kitchen Driver Side updated successfully"
-else
-    echo "❌ Kitchen Driver Side update failed"
-fi
-
-echo ""
-echo "📦 2/3 - Updating Kitchen Pass Side..."
-cd "../D1Mini_CabLock_KitchenPassSide"
-pio run --target upload --upload-port CabLock-KitchenPassSide.local
-if [ $? -eq 0 ]; then
-    echo "✅ Kitchen Pass Side updated successfully"
-else
-    echo "❌ Kitchen Pass Side update failed"
-fi
-
-echo ""
-echo "📦 3/3 - Updating Rear Driver Side..."
-cd "../D1Mini_CabLock_RearDriverSide"
-pio run --target upload --upload-port CabLock-RearDriverSide.local
-if [ $? -eq 0 ]; then
-    echo "✅ Rear Driver Side updated successfully"
-else
-    echo "❌ Rear Driver Side update failed"
-fi
-
-echo ""
-echo "🎉 All updates complete!"
+pio run -t upload --upload-port 192.168.8.140
 ```
 
-Make it executable:
-```bash
-chmod +x update-all-locks.sh
-./update-all-locks.sh
-```
+Reserve a DHCP lease per board on the router and give it a recognisable name — that makes
+both OTA and debugging far easier. HX-Bypass is the only board that sets its own static IP
+in firmware (`192.168.8.140`).
 
-## Emergency Recovery
+**Authentication failed.** The password is `Chester2025` on every board, set both by
+`ArduinoOTA.setPassword()` in firmware and by `--auth=` in `platformio.ini`. They have to
+match; if you change one, change both.
 
-If a board becomes unresponsive after OTA:
+**Upload starts then stalls.** Usually WiFi signal. The ESP8266 boards in particular will
+drop mid-transfer on a weak link. Move closer to the router or fall back to USB.
 
-1. **Connect USB cable** to the board
-2. **Hold down the RESET button** (if needed)
-3. **Upload via serial**:
-   ```bash
-   pio run --target upload
-   ```
-4. **Verify operation** in serial monitor
-5. **Try OTA again** once serial upload works
-
-## Questions?
-
-- Check serial monitor for detailed OTA progress messages
-- Monitor MQTT topics for status updates
-- Review error messages in PlatformIO output
-- Verify network connectivity with `ping` command
-
----
-
-**Last Updated:** October 7, 2025
-**Firmware Version:** v1.1.0
-**OTA Password:** Chester2025
+**Board is unreachable and unresponsive.** The Plumbing board self-restarts after 8
+consecutive network failures and FrontThermostat/AltInverterCharger restart after 120 s
+without WiFi or MQTT, so give an apparently dead board two minutes before pulling it.

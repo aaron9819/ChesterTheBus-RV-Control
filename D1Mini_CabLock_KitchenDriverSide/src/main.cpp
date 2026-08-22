@@ -8,7 +8,7 @@
 // ============================================
 // Set unique cabinet identifier for each D1 Mini
 #define CABINET_ID "KitchenDriverSide"  // Options: kitchen1, kitchen2, bathroom, bedroom, etc.
-#define FIRMWARE_VERSION "v1.1.0"
+#define FIRMWARE_VERSION "v3.0.0"
 
 // WiFi Configuration
 const char* ssid = "Chester IOT";
@@ -63,6 +63,7 @@ const unsigned long COMMAND_COOLDOWN_MS = 1000; // Ignore duplicate commands wit
 // Forward declarations
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void reconnectMQTT();
+void publishHomeAssistantDiscovery();
 void lockCabinet();
 void unlockCabinet();
 void sendStatus();
@@ -118,6 +119,41 @@ void processCommand(String command) {
   }
 }
 
+// ============================================================================
+// HOME ASSISTANT MQTT DISCOVERY
+// ============================================================================
+void publishHomeAssistantDiscovery() {
+  Serial.println("📡 Publishing Home Assistant MQTT Discovery...");
+
+  String deviceId = String("chester_cablock_") + String(CABINET_ID);
+  deviceId.toLowerCase();
+  String deviceName = String("Cabinet Lock - ") + String(CABINET_ID);
+
+  // Device configuration
+  String device = "{\"identifiers\":[\"" + deviceId + "\"],"
+                  "\"name\":\"" + deviceName + "\","
+                  "\"model\":\"D1 Mini (ESP8266)\","
+                  "\"manufacturer\":\"ChesterTheBus\"}";
+
+  // Lock Entity
+  String topic = String("homeassistant/lock/") + deviceId + "/lock/config";
+  String payload = "{\"name\":\"" + deviceName + "\","
+                   "\"unique_id\":\"" + deviceId + "_lock\","
+                   "\"state_topic\":\"" + topic_cabinetLock_status + "\","
+                   "\"command_topic\":\"" + topic_cabinetLock_command + "\","
+                   "\"payload_lock\":\"LOCK\","
+                   "\"payload_unlock\":\"UNLOCK\","
+                   "\"state_locked\":\"LOCKED\","
+                   "\"state_unlocked\":\"UNLOCKED\","
+                   "\"optimistic\":false,"
+                   "\"icon\":\"mdi:lock\","
+                   "\"device\":" + device + "}";
+
+  mqttClient.publish(topic.c_str(), payload.c_str(), true);
+
+  Serial.println("✓ Home Assistant Discovery published");
+}
+
 void reconnectMQTT() {
   // Loop until we're reconnected
   while (!mqttClient.connected()) {
@@ -139,6 +175,9 @@ void reconnectMQTT() {
 
     if (connected) {
       Serial.println("connected");
+
+      // Publish Home Assistant discovery
+      publishHomeAssistantDiscovery();
 
       // Subscribe to individual command topic
       mqttClient.subscribe(topic_cabinetLock_command.c_str());
@@ -243,6 +282,7 @@ void setup() {
     // Setup MQTT
     mqttClient.setServer(mqtt_server, mqtt_port);
     mqttClient.setCallback(mqttCallback);
+    mqttClient.setBufferSize(1024);
 
     // Connect to MQTT broker
     reconnectMQTT();

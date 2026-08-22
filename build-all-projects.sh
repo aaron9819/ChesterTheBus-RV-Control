@@ -21,16 +21,17 @@ cd "$SCRIPT_DIR"
 # Counter for successful builds
 SUCCESS_COUNT=0
 FAIL_COUNT=0
-TOTAL_PROJECTS=6
+TOTAL_PROJECTS=7
 
 # Array of project directories
 PROJECTS=(
-    "Mopeka Testing"
-    "GIGA_R1_TheBrain"
-    "D1 Plumbing system"
-    "D1Mini_CabLock"
+    "Plumbing"
+    "FrontThermostat"
+    "AltInverterCharger"
+    "HX-Bypass"
     "D1Mini_CabLock_KitchenDriverSide"
-    "D1Mini_CabLock_KitchenPassSide"
+    "D1Mini_CabLock_KitchenUpperPassSide"
+    "D1Mini_CabLock_RearDriverSide"
 )
 
 echo "Found $TOTAL_PROJECTS projects to build:"

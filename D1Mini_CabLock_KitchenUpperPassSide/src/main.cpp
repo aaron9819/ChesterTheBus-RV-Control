@@ -1,12 +1,14 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <Servo.h>
+#include <ArduinoOTA.h>
 
 // ============================================
 // CONFIGURATION - Change for each D1 Mini
 // ============================================
 // Set unique cabinet identifier for each D1 Mini
 #define CABINET_ID "KitchenUpperPassSide"  // Options: kitchen1, kitchen2, bathroom, bedroom, etc.
+#define FIRMWARE_VERSION "v3.0.0"
 
 // WiFi Configuration
 const char* ssid = "Chester IOT";
@@ -17,6 +19,10 @@ const char* mqtt_server = "192.168.8.1";  // Router IP address
 const int mqtt_port = 1883;
 const char* mqtt_user = "";  // No username
 const char* mqtt_password = "";  // No password
+
+// OTA Configuration
+const char* otaHostname = "CabLock-KitchenUpperPassSide";
+const char* otaPassword = "Chester2025";
 
 // MQTT Client ID - Unique per device
 String mqtt_client_id = String("CabLock_") + String(CABINET_ID);
@@ -52,6 +58,7 @@ const unsigned long STATUS_INTERVAL = 60000; // Send status every 60 seconds
 // Forward declarations
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void reconnectMQTT();
+void publishHomeAssistantDiscovery();
 void lockCabinet();
 void unlockCabinet();
 void sendStatus();
@@ -94,6 +101,41 @@ void processCommand(String command) {
   }
 }
 
+// ============================================================================
+// HOME ASSISTANT MQTT DISCOVERY
+// ============================================================================
+void publishHomeAssistantDiscovery() {
+  Serial.println("📡 Publishing Home Assistant MQTT Discovery...");
+
+  String deviceId = String("chester_cablock_") + String(CABINET_ID);
+  deviceId.toLowerCase();
+  String deviceName = String("Cabinet Lock - ") + String(CABINET_ID);
+
+  // Device configuration
+  String device = "{\"identifiers\":[\"" + deviceId + "\"],"
+                  "\"name\":\"" + deviceName + "\","
+                  "\"model\":\"D1 Mini (ESP8266)\","
+                  "\"manufacturer\":\"ChesterTheBus\"}";
+
+  // Lock Entity
+  String topic = String("homeassistant/lock/") + deviceId + "/lock/config";
+  String payload = "{\"name\":\"" + deviceName + "\","
+                   "\"unique_id\":\"" + deviceId + "_lock\","
+                   "\"state_topic\":\"" + topic_cabinetLock_status + "\","
+                   "\"command_topic\":\"" + topic_cabinetLock_command + "\","
+                   "\"payload_lock\":\"LOCK\","
+                   "\"payload_unlock\":\"UNLOCK\","
+                   "\"state_locked\":\"LOCKED\","
+                   "\"state_unlocked\":\"UNLOCKED\","
+                   "\"optimistic\":false,"
+                   "\"icon\":\"mdi:lock\","
+                   "\"device\":" + device + "}";
+
+  mqttClient.publish(topic.c_str(), payload.c_str(), true);
+
+  Serial.println("✓ Home Assistant Discovery published");
+}
+
 void reconnectMQTT() {
   // Loop until we're reconnected
   while (!mqttClient.connected()) {
@@ -115,6 +157,9 @@ void reconnectMQTT() {
 
     if (connected) {
       Serial.println("connected");
+
+      // Publish Home Assistant discovery
+      publishHomeAssistantDiscovery();
 
       // Subscribe to individual command topic
       mqttClient.subscribe(topic_cabinetLock_command.c_str());
@@ -176,15 +221,58 @@ void setup() {
     Serial.print("MAC address: ");
     Serial.println(WiFi.macAddress());
 
+    // Setup OTA (Over-The-Air) updates
+    ArduinoOTA.setHostname(otaHostname);
+    ArduinoOTA.setPassword(otaPassword);
+
+    ArduinoOTA.onStart([]() {
+      Serial.println("\n🔄 OTA Update Starting...");
+      // Detach servo during update for safety
+      if (lockServo.attached()) {
+        lockServo.detach();
+      }
+    });
+
+    ArduinoOTA.onEnd([]() {
+      Serial.println("\n✓ OTA Update Complete! Rebooting...");
+    });
+
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+      static int lastPercent = -1;
+      int percentComplete = (progress / (total / 100));
+      if (percentComplete != lastPercent && percentComplete % 10 == 0) {
+        Serial.printf("   Progress: %u%%\n", percentComplete);
+        lastPercent = percentComplete;
+      }
+    });
+
+    ArduinoOTA.onError([](ota_error_t error) {
+      Serial.printf("\n✗ OTA Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) Serial.println("Authentication Failed");
+      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+
+    ArduinoOTA.begin();
+    Serial.println("✓ OTA enabled");
+    Serial.print("  Hostname: ");
+    Serial.print(otaHostname);
+    Serial.println(".local");
+
     // Setup MQTT
     mqttClient.setServer(mqtt_server, mqtt_port);
     mqttClient.setCallback(mqttCallback);
+    mqttClient.setBufferSize(1024);
 
     // Connect to MQTT broker
     reconnectMQTT();
 
     Serial.println("Ready to receive lock/unlock commands via MQTT!");
     Serial.println("Commands: LOCK, UNLOCK, TOGGLE, STATUS");
+    Serial.print("Firmware: ");
+    Serial.println(FIRMWARE_VERSION);
   } else {
     Serial.println("\nWiFi connection failed!");
     Serial.println("Will retry in loop...");
@@ -260,6 +348,9 @@ void sendStatus() {
 }
 
 void loop() {
+  // Handle OTA updates
+  ArduinoOTA.handle();
+
   // Ensure WiFi is connected
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi disconnected, reconnecting...");
