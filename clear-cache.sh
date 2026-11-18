@@ -22,36 +22,37 @@ CLEAR_MODE="${1:-all}"
 case "$CLEAR_MODE" in
   soft)
     echo "🧹 Soft clean: Clearing build artifacts only..."
-    find . -name ".pio/build" -type d -exec rm -rf {} + 2>/dev/null
+    # Projects build into .pio.nosync (kept out of iCloud); .pio is the old location
+    find . -type d \( -path "*/.pio.nosync/build" -o -path "*/.pio/build" \) -prune -exec rm -rf {} + 2>/dev/null
     echo "✓ Build artifacts cleared"
     ;;
 
   pio)
     echo "🧹 Clearing PlatformIO cache..."
-    find . -name ".pio" -type d -exec rm -rf {} + 2>/dev/null
+    find . -type d \( -name ".pio.nosync" -o -name ".pio" \) -prune -exec rm -rf {} + 2>/dev/null
     echo "✓ PlatformIO cache cleared"
     ;;
 
   vscode)
     echo "🧹 Clearing VS Code cache..."
     find . -path "*/.vscode/.cache" -type d -exec rm -rf {} + 2>/dev/null
-    find . -name ".vscode/.browse.c_cpp.db*" -exec rm -f {} + 2>/dev/null
-    find . -name ".vscode/ipch" -type d -exec rm -rf {} + 2>/dev/null
+    find . -path "*/.vscode/.browse.c_cpp.db*" -exec rm -f {} + 2>/dev/null
+    find . -path "*/.vscode/ipch" -type d -prune -exec rm -rf {} + 2>/dev/null
     echo "✓ VS Code cache cleared"
     ;;
 
   all)
     echo "🧹 Full clean: Clearing all caches..."
 
-    # PlatformIO caches
+    # PlatformIO caches (.pio.nosync, plus the old .pio location)
     echo "  → Clearing PlatformIO builds..."
-    find . -name ".pio" -type d -exec rm -rf {} + 2>/dev/null
+    find . -type d \( -name ".pio.nosync" -o -name ".pio" \) -prune -exec rm -rf {} + 2>/dev/null
 
     # VS Code caches
     echo "  → Clearing VS Code caches..."
     find . -path "*/.vscode/.cache" -type d -exec rm -rf {} + 2>/dev/null
-    find . -name ".vscode/.browse.c_cpp.db*" -exec rm -f {} + 2>/dev/null
-    find . -name ".vscode/ipch" -type d -exec rm -rf {} + 2>/dev/null
+    find . -path "*/.vscode/.browse.c_cpp.db*" -exec rm -f {} + 2>/dev/null
+    find . -path "*/.vscode/ipch" -type d -prune -exec rm -rf {} + 2>/dev/null
 
     # General caches
     echo "  → Clearing general caches..."

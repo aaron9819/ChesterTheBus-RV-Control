@@ -121,7 +121,7 @@ if [ $SUCCESS_COUNT -gt 0 ]; then
     echo "🎉 Cache has been populated for $SUCCESS_COUNT project(s)!"
     echo ""
     echo "📂 Cache locations:"
-    echo "  • Each project's .pio/ folder (build artifacts)"
+    echo "  • Each project's .pio.nosync/ folder (build artifacts)"
     echo "  • ~/.platformio/ (shared libraries)"
     echo "  • .vscode/.cache/ (IntelliSense)"
     echo ""

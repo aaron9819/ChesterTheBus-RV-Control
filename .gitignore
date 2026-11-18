@@ -4,6 +4,7 @@
 # PlatformIO Build System & Cache
 # ============================================
 .pio
+.pio.nosync
 .pio/.cache
 .pio/build
 .pio/libdeps

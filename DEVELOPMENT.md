@@ -64,19 +64,27 @@ After that, rebuilds are seconds.
 
 | Cache | Location | Cleared by |
 |---|---|---|
-| Build artifacts | `<project>/.pio/` | `./clear-cache.sh` |
+| Build artifacts and project libraries | `<project>/.pio.nosync/` | `./clear-cache.sh` |
 | Shared packages and libraries | `~/.platformio/` | `./clear-cache.sh` (optional prompt) |
 | VS Code IntelliSense | `.vscode/.cache/` | `./clear-cache.sh` |
 
 All three are gitignored. Clear them when a build fails in a way that makes no sense —
 stale object files after switching platform versions are the usual cause.
 
+**Why `.pio.nosync` and not `.pio`.** Every `platformio.ini` sets
+`[platformio] workspace_dir = .pio.nosync`. The repo lives on an iCloud-synced Desktop, and
+iCloud was dropping conflict copies (`ESP32PWM 2.cpp`, …) and cloud-only stubs into the
+build and library folders, which broke builds. iCloud skips anything ending in `.nosync`.
+Keep that line in any new project.
+
 ## Configuration conventions
 
-**Credentials are hardcoded.** Every `src/main.cpp` carries the SSID, WiFi password, broker
-address, and OTA password as string literals. There is no `secrets.h`. If you introduce
-one, add it to `.gitignore` (an entry is already there) and update all seven projects
-together.
+**Credentials are mostly hardcoded.** FrontThermostat reads its SSID, WiFi password, and OTA
+password from `include/secrets.h` (gitignored; copy `include/secrets.example.h`). Every other
+`src/main.cpp` still carries them as string literals, and every `platformio.ini` has the OTA
+password in `upload_flags`. **This repository is public**, so those values are visible on
+GitHub — rotate them, then move each project to a gitignored `secrets.h` the way
+FrontThermostat does.
 
 **Build flags.** Every `platformio.ini` defines `BUILD_TIMESTAMP`, `BUILD_DATE`, and
 `BUILD_TIME`. **No current firmware references them** — they are compiled in and unused.
