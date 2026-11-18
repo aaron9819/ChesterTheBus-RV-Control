@@ -6,7 +6,7 @@
 // CONFIGURATION
 // ============================================
 #define DEVICE_ID "HX-Bypass"
-#define FIRMWARE_VERSION "v1.0.0"
+#define FIRMWARE_VERSION "v1.0.1"
 
 // WiFi Configuration
 const char* ssid = "Chester IOT";
@@ -43,6 +43,15 @@ float tempSetpoint = 160.0;  // Default setpoint (130-200 range)
 bool autoMode = true;  // Default to auto mode
 bool valveState = false;  // false = closed, true = open
 bool reverseLogic = false;  // Set to true if logic needs to be reversed
+// Once switched, the valve holds until the temperature has moved back this far
+// past the setpoint. Without it, a reading that hovers at the setpoint (one
+// every 5 s) chatters the relay.
+const float HYSTERESIS_F = 2.0;
+
+// Networking (non-blocking)
+const unsigned long MQTT_RETRY_MS = 5000;
+unsigned long lastMqttAttempt = 0;
+bool otaStarted = false;
 
 // MQTT Client
 WiFiClient wifiClient;
@@ -219,13 +228,15 @@ void updateValve() {
   bool newValveState = valveState;
 
   if (autoMode) {
-    // In auto mode, determine valve state based on temperature
+    // In auto mode, determine valve state based on temperature (with hysteresis)
     if (!reverseLogic) {
-      // Normal logic: Open valve (ON) when temp too high, close when temp too low
-      newValveState = (currentTemp > tempSetpoint);
+      // Normal logic: Open valve (ON) above setpoint, close once HYSTERESIS_F below it
+      newValveState = valveState ? (currentTemp > tempSetpoint - HYSTERESIS_F)
+                                 : (currentTemp > tempSetpoint);
     } else {
-      // Reversed logic: Close valve (OFF) when temp too high, open when temp too low
-      newValveState = (currentTemp < tempSetpoint);
+      // Reversed logic: Open valve (ON) below setpoint, close once HYSTERESIS_F above it
+      newValveState = valveState ? (currentTemp < tempSetpoint + HYSTERESIS_F)
+                                 : (currentTemp < tempSetpoint);
     }
   } else {
     // In manual mode, keep the current valve state that was set via MQTT
@@ -262,48 +273,89 @@ void updateValve() {
   }
 }
 
+// One connection attempt at most every MQTT_RETRY_MS. This used to loop until
+// connected, which stopped OTA and WiFi recovery while the broker was down.
 void reconnectMQTT() {
-  // Loop until we're reconnected
-  while (!mqttClient.connected()) {
-    Serial.print("Attempting MQTT connection to ");
-    Serial.print(mqtt_server);
-    Serial.print(":");
-    Serial.print(mqtt_port);
-    Serial.print(" as client: ");
-    Serial.print(mqtt_client_id);
-    Serial.print("...");
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (lastMqttAttempt != 0 && millis() - lastMqttAttempt < MQTT_RETRY_MS) return;
+  lastMqttAttempt = millis();
 
-    // Connect with or without credentials
-    bool connected;
-    if (strlen(mqtt_user) > 0) {
-      connected = mqttClient.connect(mqtt_client_id.c_str(), mqtt_user, mqtt_password);
-    } else {
-      connected = mqttClient.connect(mqtt_client_id.c_str());
-    }
+  Serial.print("Attempting MQTT connection to ");
+  Serial.print(mqtt_server);
+  Serial.print(":");
+  Serial.print(mqtt_port);
+  Serial.print(" as client: ");
+  Serial.print(mqtt_client_id);
+  Serial.print("...");
 
-    if (connected) {
-      Serial.println("connected");
-
-      // Publish Home Assistant discovery
-      publishHomeAssistantDiscovery();
-
-      // Subscribe to topics
-      mqttClient.subscribe(topic_valve_command.c_str());
-      mqttClient.subscribe(topic_auto_mode_command.c_str());
-      mqttClient.subscribe(topic_temp_setpoint_command.c_str());
-      mqttClient.subscribe(topic_hydronic_temp);
-
-      Serial.println("Subscribed to command topics");
-
-      // Send initial status
-      sendStatus();
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
+  // Connect with or without credentials
+  bool connected;
+  if (strlen(mqtt_user) > 0) {
+    connected = mqttClient.connect(mqtt_client_id.c_str(), mqtt_user, mqtt_password);
+  } else {
+    connected = mqttClient.connect(mqtt_client_id.c_str());
   }
+
+  if (connected) {
+    Serial.println("connected");
+
+    // Publish Home Assistant discovery
+    publishHomeAssistantDiscovery();
+
+    // Subscribe to topics
+    mqttClient.subscribe(topic_valve_command.c_str());
+    mqttClient.subscribe(topic_auto_mode_command.c_str());
+    mqttClient.subscribe(topic_temp_setpoint_command.c_str());
+    mqttClient.subscribe(topic_hydronic_temp);
+
+    Serial.println("Subscribed to command topics");
+
+    // Send initial status
+    sendStatus();
+  } else {
+    Serial.print("failed, rc=");
+    Serial.print(mqttClient.state());
+    Serial.println(" - retrying in 5 seconds");
+  }
+}
+
+void setupOTA() {
+  ArduinoOTA.setHostname(otaHostname);
+  ArduinoOTA.setPassword(otaPassword);
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("\n🔄 OTA Update Starting...");
+  });
+
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\n✓ OTA Update Complete! Rebooting...");
+  });
+
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    static int lastPercent = -1;
+    if (total == 0) return;
+    int percentComplete = (int)((progress * 100ULL) / total);
+    if (percentComplete != lastPercent && percentComplete % 10 == 0) {
+      Serial.printf("   Progress: %u%%\n", percentComplete);
+      lastPercent = percentComplete;
+    }
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("\n✗ OTA Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Authentication Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
+  ArduinoOTA.begin();
+  otaStarted = true;
+  Serial.println("✓ OTA enabled");
+  Serial.print("  Hostname: ");
+  Serial.print(otaHostname);
+  Serial.println(".local");
 }
 
 void sendStatus() {
@@ -342,6 +394,13 @@ void setup() {
   Serial.print("Static IP configured: ");
   Serial.println(staticIP);
 
+  // MQTT is configured whether or not WiFi is up yet. It used to be set up only
+  // when WiFi connected within 20 s of boot; otherwise the loop retried forever
+  // against an unconfigured client.
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(mqttCallback);
+  mqttClient.setBufferSize(1024);
+
   // Connect to WiFi
   Serial.print("Connecting to WiFi: ");
   Serial.println(ssid);
@@ -362,57 +421,16 @@ void setup() {
     Serial.print("MAC address: ");
     Serial.println(WiFi.macAddress());
 
-    // Setup OTA (Over-The-Air) updates
-    ArduinoOTA.setHostname(otaHostname);
-    ArduinoOTA.setPassword(otaPassword);
-
-    ArduinoOTA.onStart([]() {
-      Serial.println("\n🔄 OTA Update Starting...");
-    });
-
-    ArduinoOTA.onEnd([]() {
-      Serial.println("\n✓ OTA Update Complete! Rebooting...");
-    });
-
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-      static int lastPercent = -1;
-      int percentComplete = (progress / (total / 100));
-      if (percentComplete != lastPercent && percentComplete % 10 == 0) {
-        Serial.printf("   Progress: %u%%\n", percentComplete);
-        lastPercent = percentComplete;
-      }
-    });
-
-    ArduinoOTA.onError([](ota_error_t error) {
-      Serial.printf("\n✗ OTA Error[%u]: ", error);
-      if (error == OTA_AUTH_ERROR) Serial.println("Authentication Failed");
-      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-      else if (error == OTA_END_ERROR) Serial.println("End Failed");
-    });
-
-    ArduinoOTA.begin();
-    Serial.println("✓ OTA enabled");
-    Serial.print("  Hostname: ");
-    Serial.print(otaHostname);
-    Serial.println(".local");
-
-    // Setup MQTT
-    mqttClient.setServer(mqtt_server, mqtt_port);
-    mqttClient.setCallback(mqttCallback);
-    mqttClient.setBufferSize(1024);  // Set buffer size to 1024 as requested
-
-    // Connect to MQTT broker
+    setupOTA();
     reconnectMQTT();
-
-    Serial.println("Ready to control heat exchanger bypass valve!");
-    Serial.print("Firmware: ");
-    Serial.println(FIRMWARE_VERSION);
   } else {
     Serial.println("\nWiFi connection failed!");
     Serial.println("Will retry in loop...");
   }
+
+  Serial.println("Ready to control heat exchanger bypass valve!");
+  Serial.print("Firmware: ");
+  Serial.println(FIRMWARE_VERSION);
 }
 
 void loop() {
@@ -442,8 +460,13 @@ void loop() {
     }
   }
 
-  // Handle OTA updates
-  ArduinoOTA.handle();
+  // OTA starts the first time WiFi is up, even if that is long after boot
+  if (!otaStarted && WiFi.status() == WL_CONNECTED) {
+    setupOTA();
+  }
+  if (otaStarted) {
+    ArduinoOTA.handle();
+  }
 
   // Keep MQTT connection alive
   if (!mqttClient.connected()) {

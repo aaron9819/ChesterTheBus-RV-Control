@@ -1,6 +1,6 @@
 # Heat Exchanger Bypass
 
-Wemos D1 Mini (ESP8266) · `src/main.cpp` · firmware `v1.0.0` · env `d1_mini`
+Wemos D1 Mini (ESP8266) · `src/main.cpp` · firmware `v1.0.1` · env `d1_mini`
 OTA `HX-Bypass.local` · static IP `192.168.8.140`
 
 Drives the solenoid valve that bypasses the engine-coolant heat exchanger. When the
@@ -47,16 +47,20 @@ AP restart. If you move the board to a different network, that block in `setup()
 
 ```
 valve OPEN   when  HydronicTemperature >  setpoint
-valve CLOSED when  HydronicTemperature <= setpoint
+valve CLOSED when  HydronicTemperature <  setpoint − 2 °F   (HYSTERESIS_F)
+in between         no change
 ```
 
-Setpoint defaults to **160 °F** and is settable over the range 130–200 °F. There is no
-hysteresis and no dead band — the valve tracks the comparison directly. In practice the
-Plumbing board only publishes a new temperature every 5 s, which limits how fast the valve
-can chatter, but a reading sitting exactly on the setpoint will toggle it.
+Setpoint defaults to **160 °F** and is settable over the range 130–200 °F. The 2 °F band
+keeps a reading that hovers at the setpoint (a new one every 5 s) from chattering the relay.
 
 A `reverseLogic` flag exists in the source (default `false`) that inverts the comparison if
-your valve is plumbed the other way round. It is a compile-time change, not an MQTT one.
+your valve is plumbed the other way round (open below the setpoint, close 2 °F above it).
+It is a compile-time change, not an MQTT one.
+
+**Stale input.** The valve follows Plumbing's `HydronicTemperature`, which is only published
+while the buffer-tank probe is reading. If it stops, the valve holds its last state — there
+is no timeout yet, because the safe direction depends on how the bypass is plumbed.
 
 ### Manual mode
 
