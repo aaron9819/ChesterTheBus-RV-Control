@@ -8,16 +8,19 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <EEPROM.h>
+#include <stddef.h>
+#include <math.h>
+#include "secrets.h"   // include/secrets.h (gitignored) - see include/secrets.example.h
 
 // ============================================
 // CONFIGURATION
 // ============================================
 #define CABINET_ID "KitchenPassSide"
-#define FIRMWARE_VERSION "v4.1.0"
+#define FIRMWARE_VERSION "v5.2.0"
 
 // WiFi Configuration
-const char* ssid = "Chester IOT";
-const char* password = "2025Chester9894";
+const char* ssid = SECRET_WIFI_SSID;
+const char* password = SECRET_WIFI_PASSWORD;
 
 // MQTT Configuration
 const char* mqtt_server = "192.168.8.1";
@@ -27,7 +30,7 @@ const char* mqtt_password = "";
 
 // OTA Configuration
 const char* otaHostname = "Thermostat-" CABINET_ID;
-const char* otaPassword = "Chester2025";
+const char* otaPassword = SECRET_OTA_PASSWORD;
 
 String mqtt_client_id = String("Thermostat_") + String(CABINET_ID);
 
@@ -41,7 +44,11 @@ const char* topic_thermostat_tempF = "ThermostatTempF";
 const char* topic_thermostat_setTempF = "ThermostatSetTempF";
 const char* topic_thermostat_setTempF_cmd = "ThermostatSetTempFCommand";
 const char* topic_thermostat_heating = "ThermostatHeating";
+const char* topic_thermostat_action = "ThermostatAction";
 const char* topic_engine_loop_command = "EngineLoopCommand";
+const char* topic_engine_loop_status = "EngineLoopStatus";
+const char* topic_engine_loop_valve_state = "EngineLoopValveState";  // Plumbing's valve-travel model
+const char* topic_plumbing_status = "PlumbingSystemStatus";          // Plumbing LWT: OFFLINE when gone
 const char* topic_fan_percent = "ThermostatFanPercent";
 const char* topic_fan_command = "ThermostatFanCommand";
 const char* topic_fan_speed_command = "ThermostatFanSpeedCommand";
@@ -51,6 +58,9 @@ const char* topic_thermostat_mode = "ThermostatMode";
 const char* topic_thermostat_mode_cmd = "ThermostatModeCommand";
 const char* topic_thermostat_humidity = "ThermostatHumidity";
 const char* topic_thermostat_pressure = "ThermostatPressure";
+const char* topic_sensor_fault = "ThermostatSensorFault";
+const char* topic_valve_fault = "ThermostatValveFault";
+const char* topic_availability = "ThermostatAvailability";  // LWT: online / offline
 
 // Hardware Configuration
 #define SERVO_PIN 8
@@ -59,145 +69,255 @@ const char* topic_thermostat_pressure = "ThermostatPressure";
 #define TEMP_DOWN_BUTTON 17
 #define BME280_SDA 33
 #define BME280_SCL 35
+#define BME280_ADDR 0x76
+#define OLED_ADDR 0x3C
 
-// PWM Configuration for Fan
+// PWM / LEDC allocation.
+// LEDC channels share timers in pairs (timer = (channel / 2) % 4). The servo
+// library is pinned to timer 0 (channels 0-1) with ESP32PWM::allocateTimer(0),
+// and the fan gets its own fixed channel on timer 2, so the two can never
+// collide on a channel or reconfigure each other's timer.
 #define PWM_FREQ 25000
-#define PWM_CHANNEL 2
 #define PWM_RESOLUTION 8
+#define FAN_LEDC_CHANNEL 4
+#define SERVO_LEDC_TIMER 0
+
+// Lock positions
+#define LOCKED_POSITION 90
+#define UNLOCKED_POSITION 5
+const unsigned long SERVO_MOVE_MS = 1000;
+
+// ============================================
+// STATE TYPES
+// ============================================
+enum HeatMode { HEAT_OFF = 0, HEAT_AUTO = 1 };
+enum LockState { STATE_UNKNOWN = 0, STATE_UNLOCKED = 1, STATE_LOCKED = 2 };
 
 // EEPROM Configuration
 #define EEPROM_SIZE 64
-#define EEPROM_MAGIC 0xA5B3  // Magic number to validate EEPROM data
-#define EEPROM_VERSION 1
+#define EEPROM_MAGIC 0xA5B3
+#define EEPROM_VERSION 2   // v2: setpoint stored in F, lock state added, checksum fixed
 
+// Explicit layout (no hidden padding before the checksum).
 struct ThermostatState {
-  uint16_t magic;       // Magic number for validation
-  uint8_t version;      // Version of the state structure
-  uint8_t heatMode;     // HeatMode enum value
-  float setTemp;        // Set temperature in Celsius
-  uint16_t checksum;    // Simple checksum for validation
+  uint16_t magic;
+  uint8_t version;
+  uint8_t heatMode;
+  uint8_t lockState;
+  uint8_t reserved[3];
+  float setTempF;
+  uint16_t checksum;   // covers every byte before this field
+  uint16_t pad;
 };
+static_assert(sizeof(ThermostatState) <= EEPROM_SIZE, "ThermostatState does not fit in EEPROM");
 
-Servo lockServo;
+// ============================================
+// THERMOSTAT SETTINGS
+// ============================================
+const float SETPOINT_MIN_F = 50.0;
+const float SETPOINT_MAX_F = 86.0;
+const float DEFAULT_SETPOINT_F = 70.0;
+const float TEMP_CALIBRATION_OFFSET = -6.0;  // C, compensates enclosure self-heating
 
-// BME280 Temperature Sensor
-Adafruit_BME280 bme;
-bool bmeConnected = false;
+// Fan call (PI control). Independent of the engine loop below.
+const float HEAT_ON_ERROR = 0.5;   // C below setpoint -> call for heat (fan)
+const float HEAT_OFF_ERROR = 0.0;  // C below setpoint -> stop the fan (0.5 C hysteresis)
 
-// OLED Display
-#define SCREEN_WIDTH 64
-#define SCREEN_HEIGHT 48
-#define OLED_RESET -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-bool displayConnected = false;
+// Engine loop. While heat is on, the loop is held OPEN whenever the room is at or
+// below the setpoint, so the coil stays hot and the fan never waits out a cold-coil
+// warm-up. It only closes once the room climbs this far ABOVE the setpoint, and
+// re-opens as soon as the room is back at the setpoint. The margin keeps sensor noise
+// at the setpoint from cycling the valve.
+const float LOOP_CLOSE_ABOVE_F = 0.5;   // F above setpoint -> close the engine loop
 
-// Thermostat State
-float currentTemp = 0.0;
-float currentHumidity = 0.0;
-float currentPressure = 0.0;
-float setTemp = 21.0;  // Default 21°C
-const float TEMP_CALIBRATION_OFFSET = -6.0;
+// Fan warm-up: don't blow air until hot coolant has reached the coil.
+const unsigned long FAN_DELAY = 630000;  // 10.5 min of flow for a cold coil
 
-// Heat Mode
-enum HeatMode {
-  HEAT_OFF,
-  HEAT_AUTO
-};
-HeatMode heatMode = HEAT_OFF;  // Default to OFF
+// Engine-loop valve feedback (from Plumbing's EngineLoopStatus)
+const unsigned long VALVE_CONFIRM_MS = 20000;
 
-bool heatingActive = false;
-bool engineLoopOpen = false;
-bool fanRunning = false;
-int fanSpeed = 0;  // 0-255 PWM value
-bool manualFanOverride = false;  // True when fan is being controlled from HA
-String fanPreset = "auto";  // auto | low | medium | high
+// PI Controller Parameters (C units, output in %)
+const float U_BIAS = 30.0;
+const float KP = 11.0;
+const float KI = 0.09;
+const float DEADBAND = 0.5;
+const float BOOST_ENTER = 3.0;
+const float BOOST_EXIT = 2.5;
+const float BOOST_OUTPUT = 90.0;
+const float RATE_LIMIT = 10.0;          // %/s for the automatic fan
+const float INTEGRAL_BLEED_S = 120.0;   // integral decay time constant inside the deadband
 
 // Fan preset speed percentages
 const int FAN_PRESET_LOW_PERCENT = 33;
 const int FAN_PRESET_MEDIUM_PERCENT = 66;
 const int FAN_PRESET_HIGH_PERCENT = 100;
+const int FAN_ON_DEFAULT_PERCENT = 50;
 
-// Two-stage heating timing
-unsigned long heatingStartTime = 0;
-unsigned long engineLoopOpenTime = 0;
-unsigned long engineLoopLastClosedTime = 0;
-const unsigned long FAN_DELAY = 630000;  // >10 minutes delay for fan
+// Sensor
+const unsigned long SENSOR_READ_MS = 5000;
+const unsigned long SENSOR_STALE_MS = 60000;
+const unsigned long SENSOR_RETRY_MS = 10000;
 
-// PI Controller State
-float integralError = 0.0;
-float lastControlOutput = 0.0;
-unsigned long lastControlUpdate = 0;
+// Buttons
+const unsigned long BUTTON_DEBOUNCE_MS = 30;
+const unsigned long REPEAT_DELAY_MS = 600;
+const unsigned long REPEAT_RATE_MS = 250;
+const unsigned long REPEAT_FAST_AFTER_MS = 2500;
+const unsigned long REPEAT_FAST_MS = 100;
+const unsigned long MODE_HOLD_MS = 1500;   // hold BOTH buttons to toggle heat on/off
 
-// PI Controller Parameters
-const float U_BIAS = 30.0;
-const float KP = 11.0;
-const float KI = 0.09;
-const float DEADBAND = 0.5;
-const float BOOST_THRESHOLD = 3.0;
-const float BOOST_OUTPUT = 90.0;
-const float RATE_LIMIT = 10.0;
+// Display: 0.66" 64x48 SSD1306 (LOLIN OLED shield style)
+#define SCREEN_WIDTH 64
+#define SCREEN_HEIGHT 48
+#define OLED_RESET -1
+// This glass is wired for the SSD1306's *alternative* COM-pin layout (0x12, as U8g2
+// and LOLIN's own library configure it). Adafruit_SSD1306 has no 64x48 case and sends
+// the sequential layout (0x02), which interleaves the picture: buffer rows 16-23 never
+// appear, rows 24-47 are stretched over every other line of the full height, and rows
+// 0-15 land in between. beginDisplay() sends the right value, after which all 48 rows
+// map 1:1 and the layout below can start at row 0.
+const uint8_t OLED_COM_PINS = 0x12;
+const int DISP_BODY_Y = 10;  // the big value is centred in rows 10-47, below the status line
+const unsigned long SET_VIEW_MS = 4000;
+const unsigned long MESSAGE_VIEW_MS = 2000;
+const unsigned long DISPLAY_DIM_AFTER_MS = 30000;
+const unsigned long DISPLAY_OFF_AFTER_MS = 600000;
+const unsigned long DISPLAY_PROBE_MS = 2000;
+const unsigned long DISPLAY_RENDER_MS = 100;
 
-// Button state tracking
-struct ButtonState {
-  bool currentlyPressed;
-  bool wasPressed;
-  unsigned long pressStartTime;
-  unsigned long lastChangeTime;
-  bool longPressTriggered;
-};
+// Networking
+const unsigned long WIFI_KICK_MS = 30000;
+const unsigned long WIFI_RESTART_MS = 900000;   // 15 min with no WiFi -> reboot
+const unsigned long MQTT_RETRY_MS = 5000;
+const unsigned long MQTT_RESTART_MS = 900000;   // 15 min WiFi up but no broker -> reboot
+const unsigned long STATUS_INTERVAL = 60000;
+const unsigned long STATUS_MIN_INTERVAL_MS = 1000;
+const unsigned long STATE_SAVE_DELAY_MS = 2000;
+const unsigned long COMMAND_COOLDOWN_MS = 1000;
 
-ButtonState btnUp = {false, false, 0, 0, false};
-ButtonState btnDown = {false, false, 0, 0, false};
-
-const unsigned long BUTTON_DEBOUNCE_MS = 50;
-const unsigned long LONG_PRESS_MS = 1000;
-const unsigned long REPEAT_RATE_MS = 200;
-
-// Display state
-enum DisplayMode {
-  DISPLAY_CURRENT_TEMP,
-  DISPLAY_SET_TEMP,
-  DISPLAY_MODE_CHANGE
-};
-DisplayMode displayMode = DISPLAY_CURRENT_TEMP;
-unsigned long displayModeChangeTime = 0;
-const unsigned long MODE_DISPLAY_DURATION = 2000;
-const unsigned long SET_TEMP_DISPLAY_DURATION = 3000;
-String displayMessage = "";
-
-// Lock positions
-#define LOCKED_POSITION 90
-#define UNLOCKED_POSITION 5
-
-// MQTT Client
+// ============================================
+// GLOBALS
+// ============================================
+Servo lockServo;
+Adafruit_BME280 bme;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
-// Lock State
-enum LockState {
-  STATE_UNKNOWN,
-  STATE_UNLOCKED,
-  STATE_LOCKED
-};
-
+// Persistent settings
+HeatMode heatMode = HEAT_OFF;
+float setTempF = DEFAULT_SETPOINT_F;
 LockState currentState = STATE_UNKNOWN;
-unsigned long lastStatusUpdate = 0;
-const unsigned long STATUS_INTERVAL = 60000;
+bool stateDirty = false;
+unsigned long stateDirtySince = 0;
 
-// Recovery / Watchdog
-const unsigned long WIFI_RECOVERY_TIMEOUT = 120000;
-const unsigned long MQTT_RECOVERY_TIMEOUT = 120000;
-const unsigned long DISPLAY_INIT_RETRY_MS = 10000;
+// Sensor state
+bool bmePresent = false;
+bool sensorOk = false;          // a plausible reading newer than SENSOR_STALE_MS
+bool sensorEverValid = false;
+unsigned long lastValidReading = 0;
+unsigned long lastSensorRetry = 0;
+unsigned long lastTempRead = 0;
+float currentTemp = 0.0;        // C, calibrated
+float currentHumidity = 0.0;
+float currentPressure = 0.0;
+char lastPubTemp[16] = "";
+char lastPubHum[16] = "";
+char lastPubPres[16] = "";
 
-unsigned long wifiLostSince = 0;
-unsigned long mqttLostSince = 0;
-unsigned long lastDisplayInitAttempt = 0;
+// Heating state
+bool heatingActive = false;     // calling for heat
+
+// Engine-loop request (held state, delivered until acknowledged by the broker)
+bool loopWanted = false;
+bool loopDelivered = false;     // false at boot -> CLOSE is asserted after the first connect
+unsigned long loopDeliveredAt = 0;
+bool plumbingStatusKnown = false;
+bool plumbingLoopOpen = false;
+bool valveFault = false;        // valve closed by someone else while we asked for heat
+
+// Plumbing's model of the valve's travel (EngineLoopValveState). Plumbing owns the
+// valve and keeps counting through a thermostat reboot, so whenever it is online and
+// publishing this, the coil counts as hot exactly when it reports OPEN.
+bool valveTravelKnown = false;
+bool valveFullyOpen = false;
+bool plumbingOnline = false;
+
+// Local coil warm-up model - fallback for when Plumbing is offline
+bool coilFlowing = false;       // hot coolant believed to be flowing through the coil
+unsigned long coilFlowStart = 0;
+bool coilEverStopped = false;
+unsigned long coilStoppedAt = 0;
+unsigned long coilWarmthAtStop = 0;   // ms of warm-up credit at the moment flow stopped
+
+// PI state
+float integralError = 0.0;
+bool boostActive = false;
+bool controlInitialized = false;
+unsigned long lastControlUpdate = 0;
+unsigned long lastThermostatUpdate = 0;
+
+// Fan state
+enum FanControl { FAN_CTRL_AUTO, FAN_CTRL_MANUAL, FAN_CTRL_HOLD_OFF };
+FanControl fanControl = FAN_CTRL_AUTO;
+int manualFanPercent = 0;
+const char* manualPresetName = nullptr;   // "low"/"medium"/"high", or nullptr for a custom speed
+int fanPercent = 0;                       // what the fan is actually driven at, 0-100
+float autoFanOutput = 0.0;                // rate-limited automatic output
+float autoFanTarget = 0.0;
+
+// Buttons
+struct Button {
+  uint8_t pin;
+  bool raw;
+  bool pressed;
+  unsigned long rawChangedAt;
+  unsigned long pressedAt;
+  unsigned long nextRepeatAt;
+  bool holdActive;
+};
+Button btnUp = {TEMP_UP_BUTTON, false, false, 0, 0, 0, false};
+Button btnDown = {TEMP_DOWN_BUTTON, false, false, 0, 0, 0, false};
+bool comboActive = false;
+bool comboFired = false;
+unsigned long comboSince = 0;
+
+// Display
+enum View { VIEW_HOME, VIEW_SETPOINT, VIEW_MESSAGE };
+View view = VIEW_HOME;
+unsigned long viewStart = 0;
+unsigned long viewDuration = 0;
+char msgTop[16] = "";
+char msgBig[12] = "";
+bool displayConnected = false;
+bool displayDimmed = false;
+bool displayOff = false;
+bool displayForce = true;
+unsigned long lastInteraction = 0;
+unsigned long lastDisplayProbe = 0;
+unsigned long lastRender = 0;
+String lastFrameSig = "";
+
+// Servo
+bool servoMoving = false;
+unsigned long servoMoveStart = 0;
+
+// Networking
+bool wifiDown = false;
+unsigned long wifiDownSince = 0;
+unsigned long lastWifiKick = 0;
+bool mqttDown = true;
+unsigned long mqttDownSince = 0;
+unsigned long lastMqttAttempt = 0;
 bool otaInitialized = false;
+bool otaInProgress = false;
+bool statusDirty = true;
+unsigned long lastStatusPublish = 0;
+unsigned long lastHeartbeat = 0;
 
 // Command deduplication
 String lastCommand = "";
 unsigned long lastCommandTime = 0;
-const unsigned long COMMAND_COOLDOWN_MS = 1000;
 
 // ============================================
 // FORWARD DECLARATIONS
@@ -210,73 +330,112 @@ void unlockCabinet();
 void sendStatus();
 void processCommand(String command);
 void readTemperature();
+void publishSensorReadings(bool force);
 void updateThermostat();
 float calculatePIControl(float error, float deltaTime);
-void controlFan(float controlOutputPercent);
-void checkButtons();
+void applyFan(float deltaTime);
+void setFanPercent(int percent, bool forceWrite);
+void checkButtons(unsigned long now);
 void publishThermostatStatus();
-void updateDisplay();
-void saveStateToEEPROM();
+void requestStatusPublish();
+void renderDisplay(bool force);
+void saveStateNow();
+void markStateDirty();
 void loadStateFromEEPROM();
-uint16_t calculateChecksum(ThermostatState* state);
+void setLoopWanted(bool want);
+void trySendLoopRequest();
+bool coilReady(unsigned long now);
+void setHeatMode(HeatMode mode, bool showFeedback);
+void setSetpointF(float f, bool showOnDisplay);
+void showMessage(const char* top, const char* big, unsigned long ms);
+void noteInteraction();
+
+// ============================================
+// HELPERS
+// ============================================
+float cToF(float c) { return c * 9.0f / 5.0f + 32.0f; }
+float fToC(float f) { return (f - 32.0f) * 5.0f / 9.0f; }
+
+bool i2cPresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
+bool i2cRead8(uint8_t addr, uint8_t reg, uint8_t& value) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((uint8_t)addr, (uint8_t)1) != 1) return false;
+  value = Wire.read();
+  return true;
+}
+
+// Saturation vapour pressure (Magnus), hPa
+float saturationVapourPressure(float tC) {
+  return 6.112f * expf(17.62f * tC / (243.12f + tC));
+}
 
 // ============================================
 // EEPROM STATE MANAGEMENT
 // ============================================
-uint16_t calculateChecksum(ThermostatState* state) {
-  uint16_t sum = 0;
-  uint8_t* ptr = (uint8_t*)state;
-  // Calculate checksum on all bytes except the checksum field itself
-  for (size_t i = 0; i < sizeof(ThermostatState) - sizeof(uint16_t); i++) {
-    sum += ptr[i];
+uint16_t calculateChecksum(const ThermostatState& state) {
+  // Fletcher-16 over every byte before the checksum field
+  const uint8_t* ptr = reinterpret_cast<const uint8_t*>(&state);
+  uint16_t a = 0, b = 0;
+  for (size_t i = 0; i < offsetof(ThermostatState, checksum); i++) {
+    a = (a + ptr[i]) % 255;
+    b = (b + a) % 255;
   }
-  return sum;
+  return (uint16_t)((b << 8) | a);
 }
 
-void saveStateToEEPROM() {
-  ThermostatState state;
+void saveStateNow() {
+  ThermostatState state = {};   // zeroed: no indeterminate bytes
   state.magic = EEPROM_MAGIC;
   state.version = EEPROM_VERSION;
   state.heatMode = (uint8_t)heatMode;
-  state.setTemp = setTemp;
-  state.checksum = calculateChecksum(&state);
+  state.lockState = (uint8_t)currentState;
+  state.setTempF = setTempF;
+  state.checksum = calculateChecksum(state);
 
   EEPROM.put(0, state);
-  EEPROM.commit();
+  bool ok = EEPROM.commit();
+  stateDirty = false;
 
-  Serial.println("💾 State saved to EEPROM");
-  Serial.print("   Mode: ");
-  Serial.println(heatMode == HEAT_OFF ? "OFF" : "AUTO");
-  Serial.print("   SetTemp: ");
-  Serial.print(setTemp, 1);
-  Serial.println("°C");
+  Serial.printf("State saved%s: mode=%s set=%.1fF lock=%d\n", ok ? "" : " (COMMIT FAILED)",
+                heatMode == HEAT_OFF ? "OFF" : "AUTO", setTempF, (int)currentState);
+}
+
+// Setpoint changes from buttons can arrive several per second; batch them.
+void markStateDirty() {
+  if (!stateDirty) stateDirtySince = millis();
+  stateDirty = true;
+}
+
+void flushStateIfDirty(unsigned long now) {
+  if (stateDirty && now - stateDirtySince >= STATE_SAVE_DELAY_MS) saveStateNow();
 }
 
 void loadStateFromEEPROM() {
-  ThermostatState state;
+  ThermostatState state = {};
   EEPROM.get(0, state);
 
-  // Validate magic number, version, and checksum
-  if (state.magic == EEPROM_MAGIC &&
-      state.version == EEPROM_VERSION &&
-      state.checksum == calculateChecksum(&state)) {
+  bool valid = state.magic == EEPROM_MAGIC &&
+               state.version == EEPROM_VERSION &&
+               state.checksum == calculateChecksum(state) &&
+               state.heatMode <= HEAT_AUTO &&
+               state.lockState <= STATE_LOCKED &&
+               !isnan(state.setTempF) &&
+               state.setTempF >= SETPOINT_MIN_F && state.setTempF <= SETPOINT_MAX_F;
 
-    // Restore state
+  if (valid) {
     heatMode = (HeatMode)state.heatMode;
-    setTemp = state.setTemp;
-
-    Serial.println("💾 State loaded from EEPROM");
-    Serial.print("   Mode: ");
-    Serial.println(heatMode == HEAT_OFF ? "OFF" : "AUTO");
-    Serial.print("   SetTemp: ");
-    Serial.print(setTemp, 1);
-    Serial.println("°C");
+    setTempF = state.setTempF;
+    currentState = (LockState)state.lockState;
+    Serial.printf("State loaded: mode=%s set=%.1fF lock=%d\n",
+                  heatMode == HEAT_OFF ? "OFF" : "AUTO", setTempF, (int)currentState);
   } else {
-    Serial.println("⚠️  No valid state in EEPROM, using defaults");
-    Serial.println("   Mode: OFF");
-    Serial.print("   SetTemp: ");
-    Serial.print(setTemp, 1);
-    Serial.println("°C");
+    Serial.printf("No valid state in EEPROM, using defaults: mode=OFF set=%.1fF lock=unlocked\n", setTempF);
   }
 }
 
@@ -284,110 +443,114 @@ void loadStateFromEEPROM() {
 // MQTT CALLBACK
 // ============================================
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  String message = "";
-  for (unsigned int i = 0; i < length; i++) {
-    message += (char)payload[i];
-  }
-
-  Serial.printf("MQTT message received on topic: %s - Message: ", topic);
-  Serial.println(message);
+  // Copy topic and payload first: PubSubClient reuses its buffer when we publish.
+  String t(topic);
+  String message;
+  message.reserve(length);
+  for (unsigned int i = 0; i < length; i++) message += (char)payload[i];
   message.trim();
 
-  // Cabinet lock commands
-  if (String(topic) == topic_cabinetLock_command || String(topic) == topic_allLock_command) {
+  Serial.printf("MQTT %s: %s\n", t.c_str(), message.c_str());
+
+  if (t == topic_cabinetLock_command || t == topic_allLock_command) {
     processCommand(message);
   }
-  // Set temperature command (Fahrenheit)
-  else if (String(topic) == topic_thermostat_setTempF_cmd) {
-    float tempF = message.toFloat();
-    if (tempF >= 50.0 && tempF <= 86.0) {
-      setTemp = (tempF - 32.0) * 5.0 / 9.0;
-      Serial.print("🌡️ Set temperature changed to: ");
-      Serial.print(tempF, 1);
-      Serial.println("°F");
-      saveStateToEEPROM();
-      publishThermostatStatus();
-    }
-  }
-  // Thermostat mode commands
-  else if (String(topic) == topic_thermostat_mode_cmd) {
+  else if (t == topic_engine_loop_status) {
     String m = message;
-    m.trim();
-    if (m.equalsIgnoreCase("off")) {
-      heatMode = HEAT_OFF;
-      Serial.println("⚙️ Mode set via MQTT: OFF");
-      displayMessage = "HEAT OFF";
-      displayMode = DISPLAY_MODE_CHANGE;
-      displayModeChangeTime = millis();
-      saveStateToEEPROM();
-      publishThermostatStatus();
-    } else if (m.equalsIgnoreCase("heat") || m.equalsIgnoreCase("auto")) {
-      heatMode = HEAT_AUTO;
-      Serial.println("⚙️ Mode set via MQTT: AUTO");
-      displayMessage = "HEAT AUTO";
-      displayMode = DISPLAY_MODE_CHANGE;
-      displayModeChangeTime = millis();
-      saveStateToEEPROM();
-      publishThermostatStatus();
+    m.toUpperCase();
+    plumbingStatusKnown = true;
+    plumbingLoopOpen = (m == "OPEN" || m == "ON");
+  }
+  else if (t == topic_engine_loop_valve_state || t == topic_plumbing_status) {
+    bool wasReady = coilReady(millis());
+    String m = message;
+    m.toUpperCase();
+    if (t == topic_plumbing_status) {
+      plumbingOnline = (m.length() > 0 && m != "OFFLINE");
+    } else {
+      // An empty (cleared) or unknown payload drops back to the local model
+      valveTravelKnown = (m == "OPEN" || m == "OPENING" || m == "CLOSING" || m == "CLOSED");
+      valveFullyOpen = (m == "OPEN");
+    }
+    bool ready = coilReady(millis());
+    if (ready != wasReady) {
+      Serial.printf("Coil %s (%s)\n", ready ? "hot" : "not hot",
+                    (valveTravelKnown && plumbingOnline) ? "Plumbing valve model" : "local model");
+      requestStatusPublish();
+      displayForce = true;
     }
   }
-  // Fan on/off command
-  else if (String(topic) == topic_fan_command) {
-    String cmd = message;
-    cmd.trim();
-    if (cmd.equalsIgnoreCase("ON")) {
-      manualFanOverride = true;
-      if (fanSpeed == 0) {
-        controlFan(50);  // Default to 50% when turned on with no prior speed
-      }
-      Serial.println("🌀 Fan ON via HA");
-      publishThermostatStatus();
-    } else if (cmd.equalsIgnoreCase("OFF")) {
-      manualFanOverride = false;
-      controlFan(0);
-      Serial.println("🌀 Fan OFF via HA");
-      publishThermostatStatus();
+  else if (t == topic_thermostat_setTempF_cmd) {
+    const char* s = message.c_str();
+    char* end = nullptr;
+    float tempF = strtof(s, &end);
+    if (end != s && !isnan(tempF) && tempF >= SETPOINT_MIN_F && tempF <= SETPOINT_MAX_F) {
+      setSetpointF(tempF, true);
+    } else {
+      Serial.printf("Rejected setpoint '%s' (must be %.0f-%.0f F)\n", s, SETPOINT_MIN_F, SETPOINT_MAX_F);
+      requestStatusPublish();   // re-sync HA to the real setpoint
     }
   }
-  // Fan speed percentage command
-  else if (String(topic) == topic_fan_speed_command) {
+  else if (t == topic_thermostat_mode_cmd) {
+    if (message.equalsIgnoreCase("off")) {
+      setHeatMode(HEAT_OFF, true);
+    } else if (message.equalsIgnoreCase("heat") || message.equalsIgnoreCase("auto")) {
+      setHeatMode(HEAT_AUTO, true);
+    } else {
+      requestStatusPublish();
+    }
+  }
+  else if (t == topic_fan_command) {
+    if (message.equalsIgnoreCase("ON")) {
+      manualFanPercent = (fanPercent > 0) ? fanPercent : FAN_ON_DEFAULT_PERCENT;
+      manualPresetName = nullptr;
+      fanControl = FAN_CTRL_MANUAL;
+      Serial.printf("Fan ON via HA (%d%%)\n", manualFanPercent);
+    } else if (message.equalsIgnoreCase("OFF")) {
+      // While heating, OFF holds the fan off for the rest of this heat cycle.
+      // Otherwise it simply returns the fan to automatic control (which is off).
+      fanControl = heatingActive ? FAN_CTRL_HOLD_OFF : FAN_CTRL_AUTO;
+      autoFanOutput = 0;
+      Serial.println(heatingActive ? "Fan OFF via HA (held off for this heat cycle)" : "Fan OFF via HA");
+    }
+    applyFan(0);
+    requestStatusPublish();
+  }
+  else if (t == topic_fan_speed_command) {
     int percent = message.toInt();
     if (percent >= 0 && percent <= 100) {
-      manualFanOverride = (percent > 0);
-      controlFan((float)percent);
-      Serial.print("🌀 Fan speed set via HA: ");
-      Serial.print(percent);
-      Serial.println("%");
-      publishThermostatStatus();
+      if (percent == 0) {
+        fanControl = heatingActive ? FAN_CTRL_HOLD_OFF : FAN_CTRL_AUTO;
+        autoFanOutput = 0;
+      } else {
+        manualFanPercent = percent;
+        manualPresetName = nullptr;
+        fanControl = FAN_CTRL_MANUAL;
+      }
+      Serial.printf("Fan speed via HA: %d%%\n", percent);
+      applyFan(0);
     }
+    requestStatusPublish();
   }
-  // Fan preset command (auto / low / medium / high)
-  else if (String(topic) == topic_fan_preset_command) {
+  else if (t == topic_fan_preset_command) {
     String preset = message;
-    preset.trim();
     preset.toLowerCase();
     if (preset == "auto") {
-      fanPreset = "auto";
-      manualFanOverride = false;
-      controlFan(0);  // PI controller will resume next cycle if HEAT_AUTO
+      fanControl = FAN_CTRL_AUTO;
+      autoFanOutput = fanPercent;   // ramp from where the fan is now
     } else if (preset == "low") {
-      fanPreset = "low";
-      manualFanOverride = true;
-      controlFan(FAN_PRESET_LOW_PERCENT);
+      fanControl = FAN_CTRL_MANUAL; manualPresetName = "low"; manualFanPercent = FAN_PRESET_LOW_PERCENT;
     } else if (preset == "medium") {
-      fanPreset = "medium";
-      manualFanOverride = true;
-      controlFan(FAN_PRESET_MEDIUM_PERCENT);
+      fanControl = FAN_CTRL_MANUAL; manualPresetName = "medium"; manualFanPercent = FAN_PRESET_MEDIUM_PERCENT;
     } else if (preset == "high") {
-      fanPreset = "high";
-      manualFanOverride = true;
-      controlFan(FAN_PRESET_HIGH_PERCENT);
+      fanControl = FAN_CTRL_MANUAL; manualPresetName = "high"; manualFanPercent = FAN_PRESET_HIGH_PERCENT;
     } else {
+      requestStatusPublish();
       return;
     }
-    Serial.print("🌀 Fan preset: ");
-    Serial.println(fanPreset);
-    publishThermostatStatus();
+    Serial.printf("Fan preset: %s\n", preset.c_str());
+    applyFan(0);
+    requestStatusPublish();
   }
 }
 
@@ -395,22 +558,32 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 // MQTT CONNECTION
 // ============================================
 bool reconnectMQTT() {
-  if (mqttClient.connect(mqtt_client_id.c_str(), mqtt_user, mqtt_password)) {
-    Serial.println("✓ MQTT connected");
-    mqttClient.subscribe(topic_cabinetLock_command.c_str());
-    mqttClient.subscribe(topic_allLock_command);
-    mqttClient.subscribe(topic_thermostat_setTempF_cmd);
-    mqttClient.subscribe(topic_thermostat_mode_cmd);
-    mqttClient.subscribe(topic_fan_command);
-    mqttClient.subscribe(topic_fan_speed_command);
-    mqttClient.subscribe(topic_fan_preset_command);
-
-    publishHomeAssistantDiscovery();
-    sendStatus();
-    publishThermostatStatus();
-    return true;
+  Serial.println("MQTT connecting...");
+  if (!mqttClient.connect(mqtt_client_id.c_str(), mqtt_user, mqtt_password,
+                          topic_availability, 0, true, "offline")) {
+    Serial.printf("MQTT connect failed, state=%d\n", mqttClient.state());
+    return false;
   }
-  return false;
+  Serial.println("MQTT connected");
+  mqttClient.publish(topic_availability, "online", true);
+
+  mqttClient.subscribe(topic_cabinetLock_command.c_str());
+  mqttClient.subscribe(topic_allLock_command);
+  mqttClient.subscribe(topic_thermostat_setTempF_cmd);
+  mqttClient.subscribe(topic_thermostat_mode_cmd);
+  mqttClient.subscribe(topic_fan_command);
+  mqttClient.subscribe(topic_fan_speed_command);
+  mqttClient.subscribe(topic_fan_preset_command);
+  mqttClient.subscribe(topic_engine_loop_status);
+  mqttClient.subscribe(topic_engine_loop_valve_state);
+  mqttClient.subscribe(topic_plumbing_status);
+
+  publishHomeAssistantDiscovery();
+  sendStatus();
+  publishThermostatStatus();
+  publishSensorReadings(true);
+  trySendLoopRequest();   // deliver a valve request that was made while offline
+  return true;
 }
 
 // ============================================
@@ -420,8 +593,10 @@ void publishHomeAssistantDiscovery() {
   if (!mqttClient.connected()) return;
 
   String deviceId = String("thermostat_") + String(CABINET_ID);
+  String avail = "\"availability_topic\":\"" + String(topic_availability) + "\",";
 
-  // Device information (shared by all entities)
+  // Device information (shared by all entities). Entity names below are
+  // relative to the device name, per HA's has_entity_name convention.
   String device = "\"device\":{";
   device += "\"identifiers\":[\"" + deviceId + "\"],";
   device += "\"name\":\"Front Thermostat\",";
@@ -430,19 +605,22 @@ void publishHomeAssistantDiscovery() {
   device += "\"sw_version\":\"" + String(FIRMWARE_VERSION) + "\"";
   device += "}";
 
-  // Climate entity (thermostat)
+  // Climate entity (thermostat) - name null = use the device name
   String climateTopic = "homeassistant/climate/" + deviceId + "/config";
   String climateConfig = "{";
-  climateConfig += "\"name\":\"Front Thermostat\",";
+  climateConfig += "\"name\":null,";
   climateConfig += "\"unique_id\":\"" + deviceId + "_climate\",";
+  climateConfig += avail;
   climateConfig += "\"mode_command_topic\":\"" + String(topic_thermostat_mode_cmd) + "\",";
   climateConfig += "\"mode_state_topic\":\"" + String(topic_thermostat_mode) + "\",";
   climateConfig += "\"modes\":[\"off\",\"heat\"],";
+  climateConfig += "\"action_topic\":\"" + String(topic_thermostat_action) + "\",";
   climateConfig += "\"temperature_command_topic\":\"" + String(topic_thermostat_setTempF_cmd) + "\",";
   climateConfig += "\"temperature_state_topic\":\"" + String(topic_thermostat_setTempF) + "\",";
   climateConfig += "\"current_temperature_topic\":\"" + String(topic_thermostat_tempF) + "\",";
+  climateConfig += "\"current_humidity_topic\":\"" + String(topic_thermostat_humidity) + "\",";
   climateConfig += "\"temperature_unit\":\"F\",";
-  climateConfig += "\"temp_step\":0.5,";
+  climateConfig += "\"temp_step\":1,";
   climateConfig += "\"min_temp\":50,";
   climateConfig += "\"max_temp\":86,";
   climateConfig += "\"precision\":0.1,";
@@ -453,11 +631,13 @@ void publishHomeAssistantDiscovery() {
   // Humidity sensor
   String humidityTopic = "homeassistant/sensor/" + deviceId + "_humidity/config";
   String humidityConfig = "{";
-  humidityConfig += "\"name\":\"Front Humidity\",";
+  humidityConfig += "\"name\":\"Humidity\",";
   humidityConfig += "\"unique_id\":\"" + deviceId + "_humidity\",";
+  humidityConfig += avail;
   humidityConfig += "\"state_topic\":\"" + String(topic_thermostat_humidity) + "\",";
   humidityConfig += "\"unit_of_measurement\":\"%\",";
   humidityConfig += "\"device_class\":\"humidity\",";
+  humidityConfig += "\"state_class\":\"measurement\",";
   humidityConfig += device;
   humidityConfig += "}";
   mqttClient.publish(humidityTopic.c_str(), humidityConfig.c_str(), true);
@@ -465,11 +645,13 @@ void publishHomeAssistantDiscovery() {
   // Pressure sensor
   String pressureTopic = "homeassistant/sensor/" + deviceId + "_pressure/config";
   String pressureConfig = "{";
-  pressureConfig += "\"name\":\"Front Pressure\",";
+  pressureConfig += "\"name\":\"Pressure\",";
   pressureConfig += "\"unique_id\":\"" + deviceId + "_pressure\",";
+  pressureConfig += avail;
   pressureConfig += "\"state_topic\":\"" + String(topic_thermostat_pressure) + "\",";
   pressureConfig += "\"unit_of_measurement\":\"hPa\",";
   pressureConfig += "\"device_class\":\"pressure\",";
+  pressureConfig += "\"state_class\":\"measurement\",";
   pressureConfig += device;
   pressureConfig += "}";
   mqttClient.publish(pressureTopic.c_str(), pressureConfig.c_str(), true);
@@ -481,8 +663,9 @@ void publishHomeAssistantDiscovery() {
   // Fan entity with speed control
   String fanTopic = "homeassistant/fan/" + deviceId + "_fan/config";
   String fanConfig = "{";
-  fanConfig += "\"name\":\"Thermostat Fan\",";
+  fanConfig += "\"name\":\"Fan\",";
   fanConfig += "\"unique_id\":\"" + deviceId + "_fan\",";
+  fanConfig += avail;
   fanConfig += "\"state_topic\":\"" + String(topic_fan_percent) + "\",";
   fanConfig += "\"state_value_template\":\"{{ 'ON' if value | int > 0 else 'OFF' }}\",";
   fanConfig += "\"command_topic\":\"" + String(topic_fan_command) + "\",";
@@ -497,11 +680,12 @@ void publishHomeAssistantDiscovery() {
   fanConfig += "}";
   mqttClient.publish(fanTopic.c_str(), fanConfig.c_str(), true);
 
-  // Binary sensor for heating status
+  // Binary sensor for heating status (calling for heat)
   String heatingTopic = "homeassistant/binary_sensor/" + deviceId + "_heating/config";
   String heatingConfig = "{";
-  heatingConfig += "\"name\":\"Thermostat Heating\",";
+  heatingConfig += "\"name\":\"Heating\",";
   heatingConfig += "\"unique_id\":\"" + deviceId + "_heating\",";
+  heatingConfig += avail;
   heatingConfig += "\"state_topic\":\"" + String(topic_thermostat_heating) + "\",";
   heatingConfig += "\"payload_on\":\"ON\",";
   heatingConfig += "\"payload_off\":\"OFF\",";
@@ -510,11 +694,42 @@ void publishHomeAssistantDiscovery() {
   heatingConfig += "}";
   mqttClient.publish(heatingTopic.c_str(), heatingConfig.c_str(), true);
 
+  // Diagnostic: temperature sensor fault
+  String sensorFaultTopic = "homeassistant/binary_sensor/" + deviceId + "_sensor_fault/config";
+  String sensorFaultConfig = "{";
+  sensorFaultConfig += "\"name\":\"Sensor Fault\",";
+  sensorFaultConfig += "\"unique_id\":\"" + deviceId + "_sensor_fault\",";
+  sensorFaultConfig += avail;
+  sensorFaultConfig += "\"state_topic\":\"" + String(topic_sensor_fault) + "\",";
+  sensorFaultConfig += "\"payload_on\":\"ON\",";
+  sensorFaultConfig += "\"payload_off\":\"OFF\",";
+  sensorFaultConfig += "\"device_class\":\"problem\",";
+  sensorFaultConfig += "\"entity_category\":\"diagnostic\",";
+  sensorFaultConfig += device;
+  sensorFaultConfig += "}";
+  mqttClient.publish(sensorFaultTopic.c_str(), sensorFaultConfig.c_str(), true);
+
+  // Diagnostic: heat valve closed by something other than the thermostat
+  String valveFaultTopic = "homeassistant/binary_sensor/" + deviceId + "_valve_fault/config";
+  String valveFaultConfig = "{";
+  valveFaultConfig += "\"name\":\"Heat Valve Fault\",";
+  valveFaultConfig += "\"unique_id\":\"" + deviceId + "_valve_fault\",";
+  valveFaultConfig += avail;
+  valveFaultConfig += "\"state_topic\":\"" + String(topic_valve_fault) + "\",";
+  valveFaultConfig += "\"payload_on\":\"ON\",";
+  valveFaultConfig += "\"payload_off\":\"OFF\",";
+  valveFaultConfig += "\"device_class\":\"problem\",";
+  valveFaultConfig += "\"entity_category\":\"diagnostic\",";
+  valveFaultConfig += device;
+  valveFaultConfig += "}";
+  mqttClient.publish(valveFaultTopic.c_str(), valveFaultConfig.c_str(), true);
+
   // Lock entity
   String lockTopic = "homeassistant/lock/" + deviceId + "_lock/config";
   String lockConfig = "{";
   lockConfig += "\"name\":\"Cabinet Lock\",";
   lockConfig += "\"unique_id\":\"" + deviceId + "_lock\",";
+  lockConfig += avail;
   lockConfig += "\"command_topic\":\"" + String(topic_cabinetLock_command) + "\",";
   lockConfig += "\"state_topic\":\"" + String(topic_cabinetLock_status) + "\",";
   lockConfig += "\"payload_lock\":\"LOCK\",";
@@ -525,63 +740,73 @@ void publishHomeAssistantDiscovery() {
   lockConfig += "}";
   mqttClient.publish(lockTopic.c_str(), lockConfig.c_str(), true);
 
-  Serial.println("✓ Home Assistant discovery published");
+  Serial.println("Home Assistant discovery published");
 }
 
 // ============================================
-// CABINET LOCK FUNCTIONS
+// CABINET LOCK FUNCTIONS (non-blocking servo)
 // ============================================
+void moveServo(int position) {
+  if (!lockServo.attached()) lockServo.attach(SERVO_PIN);
+  lockServo.write(position);
+  servoMoving = true;
+  servoMoveStart = millis();
+}
+
+void handleServo(unsigned long now) {
+  if (servoMoving && now - servoMoveStart >= SERVO_MOVE_MS) {
+    lockServo.detach();
+    servoMoving = false;
+  }
+}
+
 void lockCabinet() {
-  lockServo.attach(SERVO_PIN);
-  lockServo.write(LOCKED_POSITION);
-  delay(1000);
-  lockServo.detach();
+  moveServo(LOCKED_POSITION);
   currentState = STATE_LOCKED;
-  Serial.println("🔒 Cabinet LOCKED");
+  Serial.println("Cabinet LOCKED");
+  saveStateNow();
   sendStatus();
 }
 
 void unlockCabinet() {
-  lockServo.attach(SERVO_PIN);
-  lockServo.write(UNLOCKED_POSITION);
-  delay(1000);
-  lockServo.detach();
+  moveServo(UNLOCKED_POSITION);
   currentState = STATE_UNLOCKED;
-  Serial.println("🔓 Cabinet UNLOCKED");
+  Serial.println("Cabinet UNLOCKED");
+  saveStateNow();
   sendStatus();
 }
 
 void sendStatus() {
-  if (mqttClient.connected()) {
-    const char* lockStatus;
-    if (currentState == STATE_LOCKED) {
-      lockStatus = "LOCKED";
-    } else if (currentState == STATE_UNLOCKED) {
-      lockStatus = "UNLOCKED";
-    } else {
-      lockStatus = "UNKNOWN";
-    }
-    mqttClient.publish(topic_cabinetLock_status.c_str(), lockStatus, true);
-    Serial.print("Lock status: ");
-    Serial.println(lockStatus);
-  }
+  if (!mqttClient.connected() || currentState == STATE_UNKNOWN) return;
+  const char* lockStatus = (currentState == STATE_LOCKED) ? "LOCKED" : "UNLOCKED";
+  mqttClient.publish(topic_cabinetLock_status.c_str(), lockStatus, true);
 }
 
 void processCommand(String command) {
-  unsigned long currentTime = millis();
+  command.trim();
+  command.toUpperCase();
 
-  if (command == lastCommand && (currentTime - lastCommandTime) < COMMAND_COOLDOWN_MS) {
-    Serial.println("⚠️ Duplicate command ignored");
+  if (command == "STATUS") {
+    sendStatus();
     return;
   }
 
+  unsigned long now = millis();
+  if (command == lastCommand && now - lastCommandTime < COMMAND_COOLDOWN_MS) {
+    Serial.println("Duplicate lock command ignored");
+    return;
+  }
   lastCommand = command;
-  lastCommandTime = currentTime;
+  lastCommandTime = now;
 
   if (command == "LOCK") {
     lockCabinet();
   } else if (command == "UNLOCK") {
     unlockCabinet();
+  } else if (command == "TOGGLE") {
+    if (currentState == STATE_LOCKED) unlockCabinet(); else lockCabinet();
+  } else {
+    Serial.printf("Unknown lock command: %s\n", command.c_str());
   }
 }
 
@@ -589,597 +814,831 @@ void processCommand(String command) {
 // TEMPERATURE SENSOR
 // ============================================
 void readTemperature() {
-  if (bmeConnected) {
-    float tempReading = bme.readTemperature();
-    float humReading = bme.readHumidity();
-    float presReading = bme.readPressure() / 100.0F;
+  unsigned long now = millis();
+  lastTempRead = now;
 
-    // Guard against NaN from BME280 communication errors
-    if (isnan(tempReading) || isnan(humReading) || isnan(presReading)) {
-      Serial.println("⚠️ BME280 returned NaN - skipping reading");
-      return;
+  if (!bmePresent && now - lastSensorRetry >= SENSOR_RETRY_MS) {
+    lastSensorRetry = now;
+    if (bme.begin(BME280_ADDR)) {
+      bmePresent = true;
+      Serial.println("BME280 sensor connected");
     }
+  }
 
-    currentTemp = tempReading + TEMP_CALIBRATION_OFFSET;
-    currentHumidity = humReading;
-    currentPressure = presReading;
+  if (bmePresent) {
+    uint8_t ctrlMeas = 0;
+    if (!i2cRead8(BME280_ADDR, 0xF4, ctrlMeas)) {
+      // Sensor no longer answers on I2C (the library would return garbage, not NaN)
+      Serial.println("BME280 not responding");
+      bmePresent = false;
+      lastSensorRetry = now;
+    } else if ((ctrlMeas & 0x03) == 0) {
+      // Power-on reset: back in sleep mode with reset-value data registers. Re-initialise.
+      Serial.println("BME280 was reset - reinitialising");
+      if (!bme.begin(BME280_ADDR)) {
+        bmePresent = false;
+        lastSensorRetry = now;
+      }
+    } else {
+      float rawT = bme.readTemperature();
+      float rawH = bme.readHumidity();
+      float pres = bme.readPressure() / 100.0F;
+      float t = rawT + TEMP_CALIBRATION_OFFSET;
 
-    if (mqttClient.connected()) {
-      float currentTempF = (currentTemp * 9.0 / 5.0) + 32.0;
-      char tempStrF[8];
-      dtostrf(currentTempF, 5, 1, tempStrF);
-      mqttClient.publish(topic_thermostat_tempF, tempStrF, true);
-      mqttClient.publish(topic_thermostat_humidity, String(currentHumidity, 1).c_str(), true);
-      mqttClient.publish(topic_thermostat_pressure, String(currentPressure, 1).c_str(), true);
+      bool plausible = !isnan(rawT) && !isnan(rawH) && !isnan(pres) &&
+                       t > -30.0f && t < 60.0f &&
+                       rawH >= 0.0f && rawH <= 100.0f &&
+                       pres > 300.0f && pres < 1100.0f;
+      if (plausible) {
+        currentTemp = t;
+        // The sensor reads RH at its own (self-heated) temperature; convert to RH at room temperature.
+        float rh = rawH * saturationVapourPressure(rawT) / saturationVapourPressure(t);
+        currentHumidity = constrain(rh, 0.0f, 100.0f);
+        currentPressure = pres;
+        lastValidReading = now;
+        sensorEverValid = true;
+      } else {
+        Serial.printf("BME280 implausible reading: T=%.2f H=%.1f P=%.1f - ignored\n", t, rawH, pres);
+      }
     }
+  }
+
+  bool wasOk = sensorOk;
+  sensorOk = sensorEverValid && (now - lastValidReading < SENSOR_STALE_MS);
+  if (wasOk != sensorOk) {
+    Serial.println(sensorOk ? "Temperature sensor OK" : "TEMPERATURE SENSOR FAULT - heating disabled");
+    requestStatusPublish();
+    displayForce = true;
+  }
+
+  publishSensorReadings(false);
+}
+
+void publishSensorReadings(bool force) {
+  if (!mqttClient.connected() || !sensorOk) return;
+  char t[16], h[16], p[16];
+  snprintf(t, sizeof(t), "%.1f", cToF(currentTemp));
+  snprintf(h, sizeof(h), "%.1f", currentHumidity);
+  snprintf(p, sizeof(p), "%.1f", currentPressure);
+  if (force || strcmp(t, lastPubTemp) != 0) { mqttClient.publish(topic_thermostat_tempF, t, true); strcpy(lastPubTemp, t); }
+  if (force || strcmp(h, lastPubHum) != 0) { mqttClient.publish(topic_thermostat_humidity, h, true); strcpy(lastPubHum, h); }
+  if (force || strcmp(p, lastPubPres) != 0) { mqttClient.publish(topic_thermostat_pressure, p, true); strcpy(lastPubPres, p); }
+}
+
+// ============================================
+// ENGINE LOOP REQUEST + COIL WARM-UP MODEL
+// ============================================
+void coilFlowStarted(unsigned long now) {
+  if (coilFlowing) return;
+  // Credit warmth the coil still holds from the previous flow period. Warmth
+  // builds while coolant flows (up to FAN_DELAY) and drains at the same rate
+  // once flow stops, so a coil closed 1 min ago is nearly hot and one closed
+  // an hour ago is cold.
+  unsigned long credit = 0;
+  if (coilEverStopped) {
+    unsigned long sinceStop = now - coilStoppedAt;
+    credit = (coilWarmthAtStop > sinceStop) ? coilWarmthAtStop - sinceStop : 0;
+  }
+  coilFlowStart = now - credit;
+  coilFlowing = true;
+  Serial.printf("Local coil model: warm-up started (%lus credit, fan in %lus)\n", credit / 1000, (FAN_DELAY - credit) / 1000);
+}
+
+void coilFlowStopped(unsigned long now) {
+  if (!coilFlowing) return;
+  unsigned long warmth = now - coilFlowStart;
+  coilWarmthAtStop = (warmth > FAN_DELAY) ? FAN_DELAY : warmth;
+  coilStoppedAt = now;
+  coilEverStopped = true;
+  coilFlowing = false;
+}
+
+bool coilReady(unsigned long now) {
+  // Plumbing's valve-travel model when available: it survives a thermostat
+  // reboot, so the fan no longer waits out a full warm-up after an OTA or a power
+  // blip while the loop has been open all along.
+  if (valveTravelKnown && plumbingOnline) return valveFullyOpen;
+  return coilFlowing && (now - coilFlowStart >= FAN_DELAY);
+}
+
+void setLoopWanted(bool want) {
+  if (want == loopWanted) return;
+  loopWanted = want;
+  loopDelivered = false;
+  valveFault = false;
+  if (!want) coilFlowStopped(millis());
+  trySendLoopRequest();
+  requestStatusPublish();
+}
+
+// The request is held until the broker accepts it, so a request made while
+// MQTT is down is delivered on reconnect instead of being lost.
+void trySendLoopRequest() {
+  if (loopDelivered || !mqttClient.connected()) return;
+  if (mqttClient.publish(topic_engine_loop_command, loopWanted ? "OPEN" : "CLOSE", false)) {
+    loopDelivered = true;
+    loopDeliveredAt = millis();
+    Serial.printf("Engine loop %s requested\n", loopWanted ? "OPEN" : "CLOSE");
+    if (loopWanted) coilFlowStarted(loopDeliveredAt);
+  }
+}
+
+// Compare our request with Plumbing's reported valve state. If the valve is
+// closed while we want heat (Plumbing leak shutdown, or HA's valve switch), we
+// do NOT re-open it automatically - that would override a safety shutdown.
+// We stop running the fan and raise a fault; a user action retries.
+void checkValveFeedback(unsigned long now) {
+  if (!loopWanted || !loopDelivered || !plumbingStatusKnown) return;
+
+  if (!valveFault && !plumbingLoopOpen && now - loopDeliveredAt >= VALVE_CONFIRM_MS) {
+    valveFault = true;
+    coilFlowStopped(now);
+    Serial.println("HEAT VALVE FAULT: engine loop reported CLOSED while heat is requested");
+    requestStatusPublish();
+    displayForce = true;
+  } else if (valveFault && plumbingLoopOpen) {
+    valveFault = false;
+    coilFlowStarted(now);
+    Serial.println("Engine loop reported OPEN again - heat valve fault cleared");
+    requestStatusPublish();
+    displayForce = true;
+  }
+}
+
+// A deliberate user action (button, mode or setpoint change) re-sends the heat
+// request after a valve fault.
+void retryValveAfterUserAction() {
+  if (valveFault && loopWanted) {
+    valveFault = false;
+    loopDelivered = false;
+    Serial.println("Retrying engine loop OPEN after user action");
+    trySendLoopRequest();
   }
 }
 
 // ============================================
 // THERMOSTAT CONTROL
 // ============================================
+void resetPI() {
+  integralError = 0;
+  boostActive = false;
+}
+
 void updateThermostat() {
-  if (!bmeConnected) return;
+  unsigned long now = millis();
+  float deltaTime = controlInitialized ? (now - lastControlUpdate) / 1000.0f : 1.0f;
+  deltaTime = constrain(deltaTime, 0.0f, 5.0f);   // never integrate over a long gap
+  lastControlUpdate = now;
+  controlInitialized = true;
 
-  unsigned long currentTime = millis();
+  checkValveFeedback(now);
 
-  if (heatMode == HEAT_OFF) {
-    // OFF mode - close engine loop, stop auto heating
-    // But allow manual fan control from HA
-    if (heatingActive || engineLoopOpen || (fanRunning && !manualFanOverride)) {
+  if (heatMode == HEAT_OFF || !sensorOk) {
+    if (heatingActive) {
       heatingActive = false;
-      integralError = 0;
-      lastControlOutput = 0;
-
-      if (!manualFanOverride) {
-        controlFan(0);
-      }
-
-      // Close engine loop when switching to OFF mode
-      if (engineLoopOpen) {
-        if (mqttClient.connected()) {
-          mqttClient.publish(topic_engine_loop_command, "CLOSE", false);
-        }
-        engineLoopOpen = false;
-        engineLoopLastClosedTime = currentTime;
-        Serial.println("⚡ Engine loop CLOSED (thermostat OFF)");
-      }
-
-      Serial.println("🚫 Thermostat OFF - heating disabled");
+      resetPI();
+      Serial.println(heatMode == HEAT_OFF ? "Thermostat OFF - heating stopped" : "Sensor fault - heating stopped");
+      requestStatusPublish();
     }
-    return;
-  }
+    setLoopWanted(false);
+    autoFanTarget = 0;
+  } else {
+    float error = fToC(setTempF) - currentTemp;   // C, positive = need heat
 
-  if (heatMode == HEAT_AUTO) {
-    // AUTO mode - PI controller drives fan unless a manual preset is overriding
-    float deltaTime = (lastControlUpdate > 0) ? (currentTime - lastControlUpdate) / 1000.0 : 0.1;
-    lastControlUpdate = currentTime;
+    // Engine loop: open at or below the setpoint, closed only above it (+margin).
+    // Evaluated before the fan call so the loop is always open when the fan wants heat.
+    if (!loopWanted && error >= 0.0f) {
+      Serial.printf("Room at/below setpoint (%.2f C under) - engine loop OPEN\n", error);
+      setLoopWanted(true);
+    } else if (loopWanted && -error > LOOP_CLOSE_ABOVE_F * 5.0f / 9.0f) {
+      Serial.printf("Room %.2f C above setpoint - engine loop CLOSE\n", -error);
+      setLoopWanted(false);
+    }
 
-    float error = setTemp - currentTemp;  // Positive = need heat
-
-    if (error > 0.5) {
-      // Need heat
-      if (!heatingActive) {
-        heatingActive = true;
-        heatingStartTime = currentTime;
-        integralError = 0;
-
-        if (!engineLoopOpen) {
-          if (mqttClient.connected()) {
-            mqttClient.publish(topic_engine_loop_command, "OPEN", false);
-          }
-          engineLoopOpen = true;
-
-          // Handle FAN_DELAY timing
-          unsigned long timeSinceClosed = 0;
-          if (engineLoopLastClosedTime != 0 && currentTime > engineLoopLastClosedTime) {
-            timeSinceClosed = currentTime - engineLoopLastClosedTime;
-          }
-          unsigned long effectiveElapsed = (timeSinceClosed > FAN_DELAY) ? FAN_DELAY : timeSinceClosed;
-          engineLoopOpenTime = currentTime - effectiveElapsed;
-          Serial.println("⚡ Engine loop OPEN");
-          Serial.println("⏱️  Fan will start after delay...");
-        }
-        publishThermostatStatus();
-      }
-
-      // Fan control with delay (skip writes if manual preset is active)
-      unsigned long engineLoopDuration = currentTime - engineLoopOpenTime;
-      if (engineLoopDuration >= FAN_DELAY) {
-        float controlOutput = calculatePIControl(error, deltaTime);
-        if (!manualFanOverride) controlFan(controlOutput);
-      } else {
-        if (fanRunning && !manualFanOverride) {
-          controlFan(0);
-          Serial.println("⏱️  Fan delayed - engine loop warming up");
-        }
-      }
-    } else if (error <= 0 && heatingActive) {
-      // Target reached - turn off heating
+    // Fan call: the PI controller runs the fan while the room is HEAT_ON_ERROR below
+    // the setpoint, until it reaches the setpoint. The loop stays open throughout.
+    if (!heatingActive && error > HEAT_ON_ERROR) {
+      heatingActive = true;
+      resetPI();
+      Serial.printf("Calling for heat (error %.2f C)\n", error);
+      requestStatusPublish();
+    } else if (heatingActive && error <= HEAT_OFF_ERROR) {
       heatingActive = false;
-      Serial.println("❄️ Heating off - target reached");
+      resetPI();
+      Serial.println("Target reached - fan off (engine loop stays open)");
+      requestStatusPublish();
+    }
 
-      integralError = 0;
-      lastControlOutput = 0;
-
-      if (mqttClient.connected()) {
-        mqttClient.publish(topic_engine_loop_command, "CLOSE", false);
-      }
-      engineLoopOpen = false;
-      engineLoopLastClosedTime = currentTime;
-      Serial.println("⚡ Engine loop CLOSED");
-
-      if (!manualFanOverride) controlFan(0);
-      publishThermostatStatus();
+    if (heatingActive && !valveFault && coilReady(now)) {
+      autoFanTarget = calculatePIControl(error, deltaTime);
+    } else {
+      autoFanTarget = 0;
     }
   }
+
+  // A "fan off" hold only lasts for the heat cycle it was given in.
+  if (fanControl == FAN_CTRL_HOLD_OFF && !heatingActive) {
+    fanControl = FAN_CTRL_AUTO;
+    requestStatusPublish();
+  }
+
+  applyFan(deltaTime);
 }
 
 // ============================================
 // PI CONTROLLER
 // ============================================
 float calculatePIControl(float error, float deltaTime) {
-  // Boost mode for large errors
-  if (error > BOOST_THRESHOLD) {
-    Serial.print("🚀 BOOST MODE: error ");
-    Serial.print(error, 1);
-    Serial.println("°C");
+  // Boost with hysteresis so the output doesn't flip around 3.0 C
+  if (!boostActive && error > BOOST_ENTER) {
+    boostActive = true;
+    Serial.printf("BOOST: error %.1f C\n", error);
+  } else if (boostActive && error < BOOST_EXIT) {
+    boostActive = false;
     integralError = 0;
-    lastControlOutput = BOOST_OUTPUT;
-    return BOOST_OUTPUT;
   }
+  if (boostActive) return BOOST_OUTPUT;
 
-  // Apply deadband
+  float maxIntegral = (100.0f - U_BIAS) / KI;
   float activeError = error;
-  if (abs(error) < DEADBAND) {
+
+  if (error < DEADBAND) {
+    // Close to the setpoint: no proportional push, and let the integral bleed
+    // off so the fan winds down instead of staying pinned until the cutoff.
     activeError = 0;
+    integralError -= integralError * fminf(deltaTime / INTEGRAL_BLEED_S, 1.0f);
+  } else {
+    float trial = U_BIAS + KP * activeError + KI * integralError;
+    if (trial < 100.0f) {   // anti-windup: stop integrating once saturated
+      integralError += activeError * deltaTime;
+    }
   }
+  integralError = constrain(integralError, 0.0f, maxIntegral);
 
-  // Proportional term
-  float proportional = KP * activeError;
-
-  // Integral term with anti-windup
-  bool atUpperLimit = (lastControlOutput >= 100.0 && activeError > 0);
-  bool atLowerLimit = (lastControlOutput <= 0.0 && activeError < 0);
-
-  if (!atUpperLimit && !atLowerLimit) {
-    integralError += activeError * deltaTime;
-    float maxIntegral = 100.0 / KI;
-    integralError = constrain(integralError, -maxIntegral, maxIntegral);
-  }
-
-  float integral = KI * integralError;
-
-  // Calculate output
-  float output = U_BIAS + proportional + integral;
-  output = constrain(output, 0.0, 100.0);
-
-  // Rate limiting
-  float maxChange = RATE_LIMIT * deltaTime;
-  float change = output - lastControlOutput;
-  if (abs(change) > maxChange) {
-    output = lastControlOutput + (change > 0 ? maxChange : -maxChange);
-  }
-
-  lastControlOutput = output;
-  return output;
+  float output = U_BIAS + KP * activeError + KI * integralError;
+  return constrain(output, 0.0f, 100.0f);
 }
 
 // ============================================
 // FAN CONTROL
 // ============================================
-void controlFan(float controlOutputPercent) {
-  int pwmValue = (int)((controlOutputPercent / 100.0) * 255.0);
-  pwmValue = constrain(pwmValue, 0, 255);
-
-  if (pwmValue != fanSpeed) {
-    fanSpeed = pwmValue;
-    ledcWrite(FAN_PWM_PIN, fanSpeed);
-    fanRunning = (fanSpeed > 0);
-
-    Serial.print("🌀 Fan speed: ");
-    Serial.print((int)controlOutputPercent);
-    Serial.println("%");
+void applyFan(float deltaTime) {
+  switch (fanControl) {
+    case FAN_CTRL_MANUAL:
+      autoFanOutput = manualFanPercent;
+      setFanPercent(manualFanPercent, false);
+      break;
+    case FAN_CTRL_HOLD_OFF:
+      autoFanOutput = 0;
+      setFanPercent(0, false);
+      break;
+    case FAN_CTRL_AUTO:
+    default: {
+      if (boostActive && autoFanTarget >= BOOST_OUTPUT) {
+        autoFanOutput = autoFanTarget;   // boost jumps straight to its output
+      } else {
+        float maxStep = RATE_LIMIT * deltaTime;
+        float change = autoFanTarget - autoFanOutput;
+        if (fabsf(change) > maxStep) change = (change > 0) ? maxStep : -maxStep;
+        autoFanOutput += change;
+      }
+      setFanPercent((int)lroundf(autoFanOutput), false);
+      break;
+    }
   }
+}
+
+void setFanPercent(int percent, bool forceWrite) {
+  percent = constrain(percent, 0, 100);
+  if (percent == fanPercent && !forceWrite) return;
+  bool changed = (percent != fanPercent);
+  fanPercent = percent;
+  uint32_t duty = (uint32_t)((percent * 255 + 50) / 100);
+  ledcWrite(FAN_PWM_PIN, duty);
+  if (changed) {
+    Serial.printf("Fan speed: %d%%\n", fanPercent);
+    requestStatusPublish();
+  }
+}
+
+const char* fanPresetState() {
+  if (fanControl == FAN_CTRL_AUTO) return "auto";
+  if (fanControl == FAN_CTRL_MANUAL && manualPresetName) return manualPresetName;
+  return "None";   // HA's payload_reset_preset_mode: manual speed, no preset
+}
+
+const char* hvacAction() {
+  if (heatMode == HEAT_OFF) return fanPercent > 0 ? "fan" : "off";
+  if (heatingActive && !valveFault) {
+    return coilReady(millis()) ? "heating" : "preheating";
+  }
+  return fanPercent > 0 ? "fan" : "idle";
+}
+
+// ============================================
+// SETTINGS CHANGES (shared by buttons and MQTT)
+// ============================================
+void setHeatMode(HeatMode mode, bool showFeedback) {
+  bool changed = (mode != heatMode);
+  heatMode = mode;
+  if (changed) {
+    Serial.printf("Mode: %s\n", mode == HEAT_OFF ? "OFF" : "AUTO");
+    if (mode == HEAT_OFF && fanControl == FAN_CTRL_HOLD_OFF) fanControl = FAN_CTRL_AUTO;
+    markStateDirty();
+  }
+  retryValveAfterUserAction();
+  requestStatusPublish();
+  if (showFeedback) showMessage("MODE", mode == HEAT_OFF ? "OFF" : "HEAT", MESSAGE_VIEW_MS);
+}
+
+void setSetpointF(float f, bool showOnDisplay) {
+  f = constrain(f, SETPOINT_MIN_F, SETPOINT_MAX_F);
+  if (f != setTempF) {
+    setTempF = f;
+    Serial.printf("Setpoint: %.1f F\n", setTempF);
+    markStateDirty();
+  }
+  retryValveAfterUserAction();
+  requestStatusPublish();
+  if (showOnDisplay && displayConnected && !displayOff) {
+    view = VIEW_SETPOINT;
+    viewStart = millis();
+    viewDuration = SET_VIEW_MS;
+    displayForce = true;
+  }
+}
+
+// ============================================
+// STATUS PUBLISHING
+// ============================================
+void requestStatusPublish() {
+  statusDirty = true;
+}
+
+void publishThermostatStatus() {
+  if (!mqttClient.connected()) return;
+  char buf[16];
+
+  snprintf(buf, sizeof(buf), "%.1f", setTempF);
+  mqttClient.publish(topic_thermostat_setTempF, buf, true);
+  mqttClient.publish(topic_thermostat_heating, (heatingActive && !valveFault) ? "ON" : "OFF", true);
+  mqttClient.publish(topic_thermostat_mode, heatMode == HEAT_OFF ? "off" : "heat", true);
+  mqttClient.publish(topic_thermostat_action, hvacAction(), true);
+  snprintf(buf, sizeof(buf), "%d", fanPercent);
+  mqttClient.publish(topic_fan_percent, buf, true);
+  mqttClient.publish(topic_fan_preset, fanPresetState(), true);
+  mqttClient.publish(topic_sensor_fault, sensorOk ? "OFF" : "ON", true);
+  mqttClient.publish(topic_valve_fault, valveFault ? "ON" : "OFF", true);
+
+  statusDirty = false;
+  lastStatusPublish = millis();
 }
 
 // ============================================
 // BUTTON HANDLING
+//   Press UP/DOWN        first press shows the setpoint, further presses change it 1 F
+//   Hold UP/DOWN         repeats, accelerating after 2.5 s
+//   Hold BOTH 1.5 s      toggles heat on/off
+//   Any press on a dark screen only wakes it
 // ============================================
-void checkButtons() {
-  unsigned long currentTime = millis();
-  bool upPressed = (digitalRead(TEMP_UP_BUTTON) == LOW);
-  bool downPressed = (digitalRead(TEMP_DOWN_BUTTON) == LOW);
-
-  // Process UP button
-  if (upPressed != btnUp.currentlyPressed) {
-    if (currentTime - btnUp.lastChangeTime >= BUTTON_DEBOUNCE_MS) {
-      btnUp.currentlyPressed = upPressed;
-      btnUp.lastChangeTime = currentTime;
-
-      if (upPressed) {
-        btnUp.pressStartTime = currentTime;
-        btnUp.longPressTriggered = false;
-        Serial.println("⬆️ UP button pressed");
-      } else {
-        unsigned long pressDuration = currentTime - btnUp.pressStartTime;
-
-        if (!btnUp.longPressTriggered && pressDuration < LONG_PRESS_MS) {
-          // Short press - increase temperature
-          setTemp += 0.5;
-          if (setTemp > 30.0) setTemp = 30.0;
-          Serial.print("🔼 Set temp: ");
-          Serial.print(setTemp);
-          Serial.println("°C");
-          displayMode = DISPLAY_SET_TEMP;
-          displayModeChangeTime = currentTime;
-          updateDisplay();
-          saveStateToEEPROM();
-          publishThermostatStatus();
-        }
-        Serial.println("⬆️ UP button released");
-      }
+bool debounceButton(Button& b, unsigned long now) {
+  bool r = (digitalRead(b.pin) == LOW);
+  if (r != b.raw) {
+    b.raw = r;
+    b.rawChangedAt = now;
+  }
+  if (b.raw != b.pressed && now - b.rawChangedAt >= BUTTON_DEBOUNCE_MS) {
+    b.pressed = b.raw;
+    if (b.pressed) {
+      b.pressedAt = now;
+      return true;
     }
+    b.holdActive = false;
+  }
+  return false;
+}
+
+void stepSetpoint(int direction) {
+  float stepped = (float)lroundf(setTempF) + direction;
+  setSetpointF(stepped, true);
+}
+
+void handlePress(Button& b, int direction, unsigned long now) {
+  if (displayConnected && displayOff) {
+    noteInteraction();   // wake only
+    b.holdActive = false;
+    return;
+  }
+  noteInteraction();
+  b.holdActive = true;
+  b.nextRepeatAt = now + REPEAT_DELAY_MS;
+
+  if (displayConnected && view != VIEW_SETPOINT) {
+    setSetpointF(setTempF, true);   // just show it
+    return;
+  }
+  stepSetpoint(direction);
+}
+
+void handleHold(Button& b, int direction, unsigned long now) {
+  if (!b.pressed || !b.holdActive) return;
+  if ((long)(now - b.nextRepeatAt) >= 0) {
+    noteInteraction();
+    stepSetpoint(direction);
+    unsigned long held = now - b.pressedAt;
+    b.nextRepeatAt = now + (held > REPEAT_FAST_AFTER_MS ? REPEAT_FAST_MS : REPEAT_RATE_MS);
+  }
+}
+
+void checkButtons(unsigned long now) {
+  bool upEdge = debounceButton(btnUp, now);
+  bool downEdge = debounceButton(btnDown, now);
+
+  if (btnUp.pressed && btnDown.pressed) {
+    if (!comboActive) {
+      comboActive = true;
+      comboFired = false;
+      comboSince = now;
+      btnUp.holdActive = false;
+      btnDown.holdActive = false;
+      noteInteraction();
+    } else if (!comboFired && now - comboSince >= MODE_HOLD_MS) {
+      comboFired = true;
+      setHeatMode(heatMode == HEAT_OFF ? HEAT_AUTO : HEAT_OFF, true);
+    }
+    return;
+  }
+  if (comboActive) {
+    // Ignore the leftover button until both are released
+    if (!btnUp.pressed && !btnDown.pressed) comboActive = false;
+    return;
   }
 
-  // Check for long press on UP button
-  if (btnUp.currentlyPressed && !btnUp.longPressTriggered) {
-    if (currentTime - btnUp.pressStartTime >= LONG_PRESS_MS) {
-      btnUp.longPressTriggered = true;
-      if (heatMode != HEAT_AUTO) {
-        heatMode = HEAT_AUTO;
-        Serial.println("🔥 Mode: AUTO");
-        displayMessage = "HEAT AUTO";
-        displayMode = DISPLAY_MODE_CHANGE;
-        displayModeChangeTime = currentTime;
-        updateDisplay();
-        saveStateToEEPROM();
-        publishThermostatStatus();
-      }
-    }
-  }
+  if (upEdge) handlePress(btnUp, +1, now);
+  if (downEdge) handlePress(btnDown, -1, now);
+  handleHold(btnUp, +1, now);
+  handleHold(btnDown, -1, now);
+}
 
-  // Process DOWN button
-  if (downPressed != btnDown.currentlyPressed) {
-    if (currentTime - btnDown.lastChangeTime >= BUTTON_DEBOUNCE_MS) {
-      btnDown.currentlyPressed = downPressed;
-      btnDown.lastChangeTime = currentTime;
+// ============================================
+// DISPLAY
+//   Home:     top line  OFF / AUTO 70 / WARM>70 / HEAT>70 / SENSOR! / VALVE!
+//             flags     M = fan under manual control, ! = not connected to MQTT
+//             big       room temperature, rounded (--F when unknown)
+//   Setpoint: SET (or SET (OFF) when heat is off) + setpoint
+// ============================================
+void noteInteraction() {
+  lastInteraction = millis();
+}
 
-      if (downPressed) {
-        btnDown.pressStartTime = currentTime;
-        btnDown.longPressTriggered = false;
-        Serial.println("⬇️ DOWN button pressed");
-      } else {
-        unsigned long pressDuration = currentTime - btnDown.pressStartTime;
+void showMessage(const char* top, const char* big, unsigned long ms) {
+  strncpy(msgTop, top, sizeof(msgTop) - 1);
+  msgTop[sizeof(msgTop) - 1] = '\0';
+  strncpy(msgBig, big, sizeof(msgBig) - 1);
+  msgBig[sizeof(msgBig) - 1] = '\0';
+  view = VIEW_MESSAGE;
+  viewStart = millis();
+  viewDuration = ms;
+  displayForce = true;
+}
 
-        if (!btnDown.longPressTriggered && pressDuration < LONG_PRESS_MS) {
-          // Short press - decrease temperature
-          setTemp -= 0.5;
-          if (setTemp < 10.0) setTemp = 10.0;
-          Serial.print("🔽 Set temp: ");
-          Serial.print(setTemp);
-          Serial.println("°C");
-          displayMode = DISPLAY_SET_TEMP;
-          displayModeChangeTime = currentTime;
-          updateDisplay();
-          saveStateToEEPROM();
-          publishThermostatStatus();
-        }
-        Serial.println("⬇️ DOWN button released");
-      }
-    }
-  }
+// display.begin() plus the COM-pin layout this panel actually needs (see OLED_COM_PINS)
+bool beginDisplay() {
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR, true, false)) return false;
+  display.ssd1306_command(SSD1306_SETCOMPINS);
+  display.ssd1306_command(OLED_COM_PINS);
+  return true;
+}
 
-  // Check for long press on DOWN button
-  if (btnDown.currentlyPressed && !btnDown.longPressTriggered) {
-    if (currentTime - btnDown.pressStartTime >= LONG_PRESS_MS) {
-      btnDown.longPressTriggered = true;
-      if (heatMode != HEAT_OFF) {
-        heatMode = HEAT_OFF;
-        Serial.println("🚫 Mode: OFF");
-        displayMessage = "HEAT OFF";
-        displayMode = DISPLAY_MODE_CHANGE;
-        displayModeChangeTime = currentTime;
-        updateDisplay();
-        saveStateToEEPROM();
-        publishThermostatStatus();
-      }
+void probeDisplay(unsigned long now) {
+  if (now - lastDisplayProbe < DISPLAY_PROBE_MS) return;
+  lastDisplayProbe = now;
+
+  // Adafruit_SSD1306::begin() succeeds even with no panel attached, so check for an ACK.
+  bool ack = i2cPresent(OLED_ADDR);
+  if (displayConnected && !ack) {
+    displayConnected = false;
+    Serial.println("Display lost");
+  } else if (!displayConnected && ack) {
+    if (beginDisplay()) {
+      displayConnected = true;
+      displayOff = false;
+      displayDimmed = false;
+      displayForce = true;
+      lastFrameSig = "";
+      Serial.println("Display connected");
     }
   }
 }
 
-void publishThermostatStatus() {
-  if (mqttClient.connected()) {
-    // Set temperature in Fahrenheit
-    float setTempF = (setTemp * 9.0 / 5.0) + 32.0;
-    char setTempStrF[8];
-    dtostrf(setTempF, 5, 1, setTempStrF);
-    mqttClient.publish(topic_thermostat_setTempF, setTempStrF, true);
-
-    // Heating status
-    mqttClient.publish(topic_thermostat_heating, heatingActive ? "ON" : "OFF", true);
-
-    // Mode
-    const char* modeStr = (heatMode == HEAT_OFF) ? "off" : "heat";
-    mqttClient.publish(topic_thermostat_mode, modeStr, true);
-
-    // Fan percent
-    int percent = (fanSpeed * 100) / 255;
-    char pctStr[8];
-    itoa(percent, pctStr, 10);
-    mqttClient.publish(topic_fan_percent, pctStr, true);
-
-    // Fan preset
-    mqttClient.publish(topic_fan_preset, fanPreset.c_str(), true);
-  }
-}
-
-// ============================================
-// DISPLAY UPDATE
-// ============================================
-void updateDisplay() {
+void updateDisplayPower(unsigned long now) {
   if (!displayConnected) return;
+  unsigned long idle = now - lastInteraction;
+  bool fault = !sensorOk || valveFault;
+  bool wantOff = !fault && !otaInProgress && idle >= DISPLAY_OFF_AFTER_MS;
+  bool wantDim = idle >= DISPLAY_DIM_AFTER_MS && !otaInProgress;
 
-  unsigned long currentTime = millis();
+  if (wantOff != displayOff) {
+    display.ssd1306_command(wantOff ? SSD1306_DISPLAYOFF : SSD1306_DISPLAYON);
+    displayOff = wantOff;
+    if (!wantOff) displayForce = true;
+  }
+  if (wantDim != displayDimmed) {
+    display.dim(wantDim);
+    displayDimmed = wantDim;
+  }
+}
 
-  // Return to current temp display after timeout
-  if (displayMode == DISPLAY_MODE_CHANGE && (currentTime - displayModeChangeTime > MODE_DISPLAY_DURATION)) {
-    displayMode = DISPLAY_CURRENT_TEMP;
+void buildHomeTop(char* out, size_t len) {
+  int setF = (int)lroundf(setTempF);
+  if (!sensorOk) {
+    snprintf(out, len, "SENSOR!");
+  } else if (heatMode == HEAT_OFF) {
+    snprintf(out, len, "OFF");
+  } else if (valveFault) {
+    snprintf(out, len, "VALVE!");
+  } else if (heatingActive) {
+    snprintf(out, len, "%s>%d", coilReady(millis()) ? "HEAT" : "WARM", setF);
+  } else {
+    snprintf(out, len, "AUTO %d", setF);
   }
-  if (displayMode == DISPLAY_SET_TEMP && (currentTime - displayModeChangeTime > SET_TEMP_DISPLAY_DURATION)) {
-    displayMode = DISPLAY_CURRENT_TEMP;
+}
+
+void renderDisplay(bool force) {
+  if (!displayConnected || displayOff) return;
+  unsigned long now = millis();
+  if (view != VIEW_HOME && now - viewStart >= viewDuration) {
+    view = VIEW_HOME;
   }
+
+  char top[16];
+  char big[12];
+  char flags[4] = "";
+
+  if (view == VIEW_MESSAGE) {
+    snprintf(top, sizeof(top), "%s", msgTop);
+    snprintf(big, sizeof(big), "%s", msgBig);
+  } else if (view == VIEW_SETPOINT) {
+    snprintf(top, sizeof(top), "%s", heatMode == HEAT_OFF ? "SET (OFF)" : "SET");
+    snprintf(big, sizeof(big), "%dF", (int)lroundf(setTempF));
+  } else {
+    buildHomeTop(top, sizeof(top));
+    if (sensorOk) snprintf(big, sizeof(big), "%dF", (int)lroundf(cToF(currentTemp)));
+    else snprintf(big, sizeof(big), "--F");
+    size_t n = 0;
+    if (fanControl != FAN_CTRL_AUTO) flags[n++] = 'M';
+    if (!mqttClient.connected()) flags[n++] = '!';
+    flags[n] = '\0';
+  }
+
+  String sig = String((int)view) + "|" + top + "|" + big + "|" + flags;
+  if (!force && sig == lastFrameSig) return;
+  lastFrameSig = sig;
 
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
+  display.setTextWrap(false);
 
-  int yOffset = 20;  // Display offset
-
-  if (displayMode == DISPLAY_MODE_CHANGE) {
-    display.setTextSize(1);
-    display.setCursor(4, 16 + yOffset);
-    display.print(displayMessage);
-  } else if (displayMode == DISPLAY_SET_TEMP) {
-    display.setTextSize(2);
-    display.setCursor(8, 8 + yOffset);
-    float setTempF = (setTemp * 9.0 / 5.0) + 32.0;
-    display.print((int)setTempF);
-    display.print("F");
-  } else {
-    display.setTextSize(2);
-    display.setCursor(8, 8 + yOffset);
-    if (bmeConnected) {
-      float currentTempF = (currentTemp * 9.0 / 5.0) + 32.0;
-      display.print((int)currentTempF);
-      display.print("F");
-    } else {
-      display.setTextSize(1);
-      display.setCursor(10, 16 + yOffset);
-      display.print("NO SENSOR");
-    }
+  // Status line across the top
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print(top);
+  if (flags[0]) {
+    display.setCursor(SCREEN_WIDTH - 6 * (int)strlen(flags), 0);
+    display.print(flags);
   }
 
+  // Big value: the largest text size that fits the width, centred below the status
+  // line. Font cells are 6x8 per size step; the last column and row are spacing.
+  int bigLen = strlen(big);
+  int size = 3;
+  while (size > 1 && bigLen * 6 * size - size > SCREEN_WIDTH) size--;
+  int inkW = bigLen * 6 * size - size;
+  int inkH = 7 * size;
+  int x = (SCREEN_WIDTH - inkW) / 2;
+  int y = DISP_BODY_Y + (SCREEN_HEIGHT - DISP_BODY_Y - inkH) / 2;
+  display.setTextSize(size);
+  display.setCursor(x > 0 ? x : 0, y);
+  display.print(big);
   display.display();
+}
+
+// ============================================
+// NETWORK MAINTENANCE (non-blocking)
+// ============================================
+void handleWifi(unsigned long now) {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (wifiDown) {
+      wifiDown = false;
+      Serial.print("WiFi connected, IP: ");
+      Serial.println(WiFi.localIP());
+    }
+    if (!otaInitialized) {
+      ArduinoOTA.begin();
+      otaInitialized = true;
+      Serial.println("OTA initialized");
+    }
+    return;
+  }
+
+  if (!wifiDown) {
+    wifiDown = true;
+    wifiDownSince = now;
+    lastWifiKick = now;
+    Serial.println("WiFi disconnected (auto-reconnect running)");
+  }
+  // The core reconnects on its own; only restart the attempt occasionally,
+  // never while an association/DHCP may still be in progress.
+  if (now - lastWifiKick >= WIFI_KICK_MS) {
+    lastWifiKick = now;
+    Serial.println("WiFi still down - restarting connection attempt");
+    WiFi.disconnect();
+    WiFi.begin(ssid, password);
+  }
+  if (now - wifiDownSince >= WIFI_RESTART_MS) {
+    Serial.println("WiFi down too long - restarting");
+    if (stateDirty) saveStateNow();
+    ESP.restart();
+  }
+}
+
+void handleMqtt(unsigned long now) {
+  if (mqttClient.connected()) {
+    if (mqttDown) {
+      mqttDown = false;
+      displayForce = true;
+    }
+    return;
+  }
+  if (!mqttDown) {
+    mqttDown = true;
+    mqttDownSince = now;
+    lastMqttAttempt = now - MQTT_RETRY_MS;   // try again right away
+    displayForce = true;
+    Serial.println("MQTT disconnected");
+  }
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (now - lastMqttAttempt < MQTT_RETRY_MS) return;
+
+  lastMqttAttempt = now;
+  if (reconnectMQTT()) {
+    mqttDown = false;
+    displayForce = true;
+  } else if (now - mqttDownSince >= MQTT_RESTART_MS) {
+    Serial.println("MQTT unreachable too long - restarting");
+    if (stateDirty) saveStateNow();
+    ESP.restart();
+  }
 }
 
 // ============================================
 // SETUP
 // ============================================
 void setup() {
+  // Drive the fan PWM low before anything else so the fan input never floats at boot.
+  bool fanPwmOk = ledcAttachChannel(FAN_PWM_PIN, PWM_FREQ, PWM_RESOLUTION, FAN_LEDC_CHANNEL);
+  ledcWrite(FAN_PWM_PIN, 0);
+
   Serial.begin(115200);
-  delay(1000);
+  delay(500);
   Serial.println("\n\n================================");
   Serial.println("RV Thermostat " + String(FIRMWARE_VERSION));
   Serial.println("Cabinet: " + String(CABINET_ID));
   Serial.println("================================\n");
+  Serial.println(fanPwmOk ? "Fan PWM initialized (LEDC ch 4)" : "FAN PWM ATTACH FAILED");
 
-  // Initialize EEPROM
   EEPROM.begin(EEPROM_SIZE);
-  Serial.println("✓ EEPROM initialized");
-
-  // Load saved state
   loadStateFromEEPROM();
 
-  // Initialize I2C
-  Wire.begin(BME280_SDA, BME280_SCL);
-  Serial.println("I2C initialized");
-
-  // Initialize BME280
-  if (bme.begin(0x76)) {
-    bmeConnected = true;
-    Serial.println("✓ BME280 sensor connected");
-  } else {
-    Serial.println("⚠️ BME280 sensor not found");
-  }
-
-  // Initialize display
-  if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    displayConnected = true;
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 20);
-    display.println("Thermostat");
-    display.println("Starting...");
-    display.display();
-    Serial.println("✓ OLED display connected");
-  } else {
-    Serial.println("⚠️ OLED display not found");
-  }
-
-  // Initialize servo
-  lockServo.attach(SERVO_PIN);
-  lockServo.write(UNLOCKED_POSITION);
-  delay(1000);
-  lockServo.detach();
-  Serial.println("✓ Servo initialized");
-
-  // Initialize fan PWM
-  ledcAttach(FAN_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
-  ledcWrite(FAN_PWM_PIN, 0);
-  Serial.println("✓ Fan PWM initialized");
-
-  // Initialize buttons
   pinMode(TEMP_UP_BUTTON, INPUT_PULLUP);
   pinMode(TEMP_DOWN_BUTTON, INPUT_PULLUP);
-  Serial.println("✓ Buttons initialized");
 
-  // Connect to WiFi
-  Serial.print("Connecting to WiFi");
+  Wire.begin(BME280_SDA, BME280_SCL);
+
+  // Display first, so the boot screen shows while the rest starts
+  if (i2cPresent(OLED_ADDR) && beginDisplay()) {
+    displayConnected = true;
+    showMessage("Starting", "--F", 3000);
+    renderDisplay(true);
+    Serial.println("OLED display connected");
+  } else {
+    Serial.println("OLED display not found (will keep checking)");
+  }
+
+  if (bme.begin(BME280_ADDR)) {
+    bmePresent = true;
+    Serial.println("BME280 sensor connected");
+  } else {
+    Serial.println("BME280 sensor not found (will keep retrying)");
+  }
+  lastSensorRetry = millis();
+  readTemperature();
+
+  // Servo: restricted to LEDC timer 0 so it never touches the fan's timer/channel.
+  ESP32PWM::allocateTimer(SERVO_LEDC_TIMER);
+  if (currentState == STATE_UNKNOWN) currentState = STATE_UNLOCKED;   // no saved state: default unlocked
+  moveServo(currentState == STATE_LOCKED ? LOCKED_POSITION : UNLOCKED_POSITION);
+  Serial.printf("Servo restored to %s\n", currentState == STATE_LOCKED ? "LOCKED" : "UNLOCKED");
+
+  // WiFi: non-blocking; loop() keeps the thermostat running while it connects.
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
 
-  int wifiAttempts = 0;
-  while (WiFi.status() != WL_CONNECTED && wifiAttempts < 40) {
-    delay(500);
-    Serial.print(".");
-    wifiAttempts++;
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n✓ WiFi connected");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\n⚠️ WiFi connection failed");
-  }
-
-  // Initialize MQTT
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(2048);
+  mqttClient.setSocketTimeout(5);
+  mqttDownSince = millis();
+  lastMqttAttempt = millis() - MQTT_RETRY_MS;   // first attempt as soon as WiFi is up
 
-  // Initialize OTA
   ArduinoOTA.setHostname(otaHostname);
   ArduinoOTA.setPassword(otaPassword);
-
   ArduinoOTA.onStart([]() {
     Serial.println("OTA Update Starting...");
+    otaInProgress = true;
+    noteInteraction();
+    if (displayOff) { display.ssd1306_command(SSD1306_DISPLAYON); displayOff = false; }
+    showMessage("UPDATING", "0%", 600000);
+    renderDisplay(true);
   });
-
   ArduinoOTA.onEnd([]() {
     Serial.println("\nOTA Update Complete!");
+    if (stateDirty) saveStateNow();
+    showMessage("UPDATE", "DONE", 5000);
+    renderDisplay(true);
   });
-
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    static unsigned int lastShown = 0;
+    if (total == 0) return;
+    unsigned int pct = (unsigned int)((progress * 100ULL) / total);
+    Serial.printf("Progress: %u%%\r", pct);
+    if (pct / 10 != lastShown / 10) {
+      lastShown = pct;
+      char b[8];
+      snprintf(b, sizeof(b), "%u%%", pct);
+      showMessage("UPDATING", b, 600000);
+      renderDisplay(true);
+    }
   });
-
   ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    otaInProgress = false;
+    Serial.printf("OTA Error[%u]\n", error);
+    showMessage("UPDATE", "FAIL", 5000);
+    renderDisplay(true);
   });
 
-  if (WiFi.status() == WL_CONNECTED) {
-    ArduinoOTA.begin();
-    otaInitialized = true;
-    Serial.println("✓ OTA initialized");
-  }
-
-  Serial.println("\n✓ Setup complete\n");
-
-  if (displayConnected) {
-    updateDisplay();
-  }
+  lastInteraction = millis();
+  Serial.println("\nSetup complete\n");
 }
 
 // ============================================
 // MAIN LOOP
 // ============================================
 void loop() {
-  // WiFi reconnection
-  if (WiFi.status() != WL_CONNECTED) {
-    if (wifiLostSince == 0) wifiLostSince = millis();
+  unsigned long now = millis();
 
-    Serial.println("WiFi disconnected, reconnecting...");
-    WiFi.begin(ssid, password);
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 6) {
-      delay(250);
-      Serial.print(".");
-      attempts++;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\n✓ WiFi reconnected");
-      wifiLostSince = 0;
-      if (!otaInitialized) {
-        ArduinoOTA.begin();
-        otaInitialized = true;
-      }
-      if (displayConnected) {
-        displayMode = DISPLAY_CURRENT_TEMP;
-        updateDisplay();
-      }
-    } else if (millis() - wifiLostSince > WIFI_RECOVERY_TIMEOUT) {
-      Serial.println("\n⚠️ WiFi timeout - restarting...");
-      ESP.restart();
-    }
-  } else {
-    wifiLostSince = 0;
-  }
-
-  // MQTT connection
-  if (!mqttClient.connected()) {
-    if (mqttLostSince == 0) mqttLostSince = millis();
-
-    if (millis() - mqttLostSince > 5000) {
-      Serial.println("MQTT reconnecting...");
-      if (reconnectMQTT()) {
-        mqttLostSince = 0;
-      } else if (millis() - mqttLostSince > MQTT_RECOVERY_TIMEOUT) {
-        Serial.println("⚠️ MQTT timeout - restarting...");
-        ESP.restart();
-      }
-    }
-  } else {
-    mqttLostSince = 0;
-  }
-
+  handleWifi(now);
+  handleMqtt(now);
   mqttClient.loop();
+  if (otaInitialized) ArduinoOTA.handle();
 
-  if (otaInitialized) {
-    ArduinoOTA.handle();
-  }
+  now = millis();
+  handleServo(now);
+  checkButtons(now);
 
-  // Display retry
-  if (!displayConnected && (millis() - lastDisplayInitAttempt > DISPLAY_INIT_RETRY_MS)) {
-    lastDisplayInitAttempt = millis();
-    if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-      displayConnected = true;
-      Serial.println("✓ Display reconnected");
-      updateDisplay();
-    }
-  }
-
-  // Read temperature every 5 seconds
-  static unsigned long lastTempRead = 0;
-  if (millis() - lastTempRead > 5000) {
-    lastTempRead = millis();
+  if (now - lastTempRead >= SENSOR_READ_MS) {
     readTemperature();
-    updateDisplay();
   }
 
-  // Update thermostat control
-  static unsigned long lastThermostatUpdate = 0;
-  if (millis() - lastThermostatUpdate > 1000) {
-    lastThermostatUpdate = millis();
+  if (now - lastThermostatUpdate >= 1000) {
+    lastThermostatUpdate = now;
     updateThermostat();
   }
 
-  // Check buttons
-  checkButtons();
-
-  // Periodic status update
-  if (millis() - lastStatusUpdate > STATUS_INTERVAL) {
-    lastStatusUpdate = millis();
-    sendStatus();
+  if (statusDirty && mqttClient.connected() && now - lastStatusPublish >= STATUS_MIN_INTERVAL_MS) {
     publishThermostatStatus();
   }
 
-  delay(50);
+  if (now - lastHeartbeat >= STATUS_INTERVAL) {
+    lastHeartbeat = now;
+    sendStatus();
+    publishThermostatStatus();
+    publishSensorReadings(true);
+    setFanPercent(fanPercent, true);   // re-assert PWM duty
+    if (mqttClient.connected()) mqttClient.publish(topic_availability, "online", true);
+  }
+
+  flushStateIfDirty(now);
+
+  probeDisplay(now);
+  updateDisplayPower(now);
+  if (displayForce || now - lastRender >= DISPLAY_RENDER_MS) {
+    lastRender = now;
+    bool force = displayForce;
+    displayForce = false;
+    renderDisplay(force);
+  }
+
+  delay(10);
 }
