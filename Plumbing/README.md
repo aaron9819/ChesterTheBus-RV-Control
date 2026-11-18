@@ -1,11 +1,11 @@
 # Plumbing & Environment Controller
 
-ESP32-S2 Mini · `src/main_esp32s2.cpp` · firmware `v3.1.0` · env `lolin_s2_mini`
+ESP32-S2 Mini · `src/main_esp32s2.cpp` · firmware `v3.5.0` · env `lolin_s2_mini`
 
 The central board of the RV system. It owns every hydronic valve, both tank heaters, the
 diesel and electric heat sources, the main water pump, the exhaust fan, the domestic hot
-water solenoid, and the RearPassSide cabinet lock. It reads four DS18B20 temperature
-sensors, a BME280, a manifold pressure transducer, and a turbine flow sensor.
+water solenoid, and the RearPassSide cabinet lock. It reads five DS18B20 temperature
+probes on one OneWire bus, a BME280, and a turbine flow sensor.
 
 Pin assignments and sensor wiring: **[../BOARD_ARCHITECTURE.md](../BOARD_ARCHITECTURE.md)**
 Topic contract: **[../MQTT_TOPICS.md](../MQTT_TOPICS.md)**
@@ -48,6 +48,12 @@ in both modes.
 Both tank readings are 5-sample moving averages, which damps the DS18B20 quantisation
 noise that would otherwise chatter the relays around the setpoint.
 
+**Probe-loss fail-safe.** A heater whose own probe has died has no control input — neither
+rule above can fire, so it would stay energised indefinitely. In AUTO, a heater whose probe
+has been missing for 60 s is switched OFF and `PlumbingAlert` names the position. MANUAL
+leaves the user in charge. Set `TEMP_PROBE_LOSS_FAILSAFE` to `false` in the source to
+restore the old behaviour (heater holds its last state, alert only).
+
 ### Exhaust fan
 
 | Rule | Condition |
@@ -59,20 +65,37 @@ noise that would otherwise chatter the relays around the setpoint.
 
 ### Domestic hot water on demand
 
-Independent of `PlumbingMode` — this runs unconditionally, driven from the flow sensor
-interrupt, because it has to react at tap-open speed.
+Independent of `PlumbingMode` — this runs unconditionally, off the flow sensor interrupt.
+
+A four-state machine evaluated every **50 ms**:
 
 ```
-flow detected  → open DHW solenoid immediately, cancel any pressure relief
-flow stops     → close DHW solenoid (unless a pressure-relief window is open)
+IDLE ──flow present──▶ STARTING ──held 600 ms──▶ ACTIVE ──flow gone──▶ STOPPING ──quiet 1.5 s──▶ IDLE
+         ▲                  │                                              │
+         └──dropped out─────┘                    └──flow returns───────────┘
 ```
 
-Flow is considered real only when both conditions hold: a pulse arrived within the last
-3 s, **and** at least 10 pulses were counted in the last 1 s window. The pulse-count floor
-is what rejects drips and electrical noise on the sensor line.
+The solenoid is touched only on the two committed transitions: `STARTING → ACTIVE` opens
+it, `STOPPING → IDLE` closes it.
 
-There is a 2 s `PRESSURE_RELIEF_DURATION` window during which the solenoid is held open
-after a stop; when it expires the valve closes only if flow is still absent.
+**Presence is deliberately hair-trigger.** A single pulse counts, and keeps counting until
+the line has been quiet for `FLOW_PULSE_IDLE_MS` (500 ms). That is what makes a trickle
+register. Noise is rejected by **duration**, not by a pulse-count floor — a burst has to
+sustain for `FLOW_ON_DELAY_MS` and land at least 5 pulses to open the valve.
+
+**Why it works that way.** The old test was "≥10 pulses in the last 1 s window". Closing
+the solenoid kicks the turbine hard enough to clear that outright, so a tap shutting off
+produced *close → reopen for a second → close*. Three things now prevent it: the burst
+cannot outlast the 600 ms on-delay, the 50 ms evaluation means a blip can no longer be
+rounded up to a full second, and a 1 s `FLOW_CLOSE_LOCKOUT_MS` refuses to even start the
+on-delay for pulses arriving right after the board itself closed the valve.
+
+The 1.5 s off-delay also serves the purpose the old `PRESSURE_RELIEF_DURATION` was meant
+to — holding the valve open briefly after flow stops. That code was dead (the flag was
+never set `true`) and has been removed.
+
+Tuning knobs are all at the top of `src/main_esp32s2.cpp`: `FLOW_ON_DELAY_MS` is what to
+raise if a reopen ever survives, `FLOW_PULSE_IDLE_MS` is the sensitivity to a trickle.
 
 ---
 
@@ -106,7 +129,8 @@ On a confirmed leak the board:
 4. Publishes `High Humidity - possible leak` to `PlumbingAlert` (retained).
 5. Publishes `LEAK_DETECTED_SHUTDOWN` to `PlumbingSystemStatus` (retained).
 
-The alarm latches. Clear it only after finding the water:
+The alarm latches. Clear it only after finding the water — with the **Clear Leak Alarm**
+button in Home Assistant, or:
 
 ```bash
 mosquitto_pub -h 192.168.8.1 -t ClearHighHumidityCommand -m clear
@@ -121,17 +145,19 @@ deliberate manual step.
 | Alert | Condition | Message |
 |---|---|---|
 | Freeze warning | fresh or grey tank < 35 °F | `Tank Freeze Warning ACTIVE` |
-| High temperature | hydronic tank > 180 °F | `High Hydronic Tank Temp ACTIVE` |
+| High temperature | buffer tank > 180 °F | `High Hydronic Tank Temp ACTIVE` |
+| Probe missing | a harness position is unbound or off the bus | `Temp probe missing: <positions>` |
 
-Both are advisory — they publish to `PlumbingAlert` and log to serial, but take no action.
-Freeze protection is handled by the tank heater automation above.
+All are advisory — they publish to `PlumbingAlert` and log to serial. The only alert
+condition that takes an action is a missing tank probe, via the fail-safe above.
 
 ### Alert priority
 
 `PlumbingAlert` is a single retained topic carrying the most severe active alert:
 
 ```
-High Humidity  >  High Hydronic Tank Temp  >  Tank Freeze Warning  >  OKAY
+High Humidity  >  High Hydronic Tank Temp  >  Tank Freeze Warning
+               >  Boiler fault  >  Temp probe missing  >  OKAY
 ```
 
 When a condition clears, `refreshAlertPublish()` recomputes and republishes, dropping back
@@ -162,6 +188,31 @@ All three relays are active LOW. "ON" energises circuits 1 and 3 while leaving c
 open; "OFF" releases all three. This combination is restored verbatim from NVS on boot.
 
 The **electric heater** on GPIO37 is the one active-HIGH output on the board — `HIGH` is on.
+
+---
+
+## Engine loop valve travel
+
+`EngineLoopStatus` only says which way the relay drives the valve. The board also models
+where the valve physically is: it takes **10.5 minutes** (`ENGINE_LOOP_TRAVEL_MS`) to travel
+fully either way, starting from wherever it is when the command changes. Closed for 3 minutes
+and then reopened, it is 3 minutes from fully open again, not 10.5.
+
+| Topic | Payload |
+|---|---|
+| `EngineLoopValveState` | `OPEN` / `OPENING` / `CLOSING` / `CLOSED` (retained, on every change) |
+| `EngineLoopValvePosition` | `0`–`100` % open (retained; every 30 s while moving). Rounds toward the end it is leaving, so `100` only ever means `OPEN` and `0` only `CLOSED` |
+
+The FrontThermostat holds its fan until `EngineLoopValveState` reads `OPEN`.
+
+The position is saved to NVS (`elTravel`) on every state change and once a minute while
+moving. On boot:
+
+| Reset | Assumed position |
+|---|---|
+| Warm (OTA, restart, crash, watchdog) | The saved position — the relay only dropped for a second or two |
+| Power-on or brownout | Closed — the valve may have moved for an unknown time; it travels from there |
+| Warm, nothing saved yet (first boot on v3.5.0) | Fully in whichever direction the relay is set |
 
 ---
 
@@ -207,25 +258,116 @@ mode is water pressure available, not a dead pump.
 
 ## Sensor calibration notes
 
-**Manifold pressure.** The transducer's ADC reading at 0 PSI is 580 counts, subtracted as
-`ADC_ZERO_OFFSET` before conversion. If a replacement sensor reads non-zero at rest, that
-constant is what to adjust. Full scale assumes 0–80 PSI across the 3.3 V range; readings
-clamp at 85 PSI.
+**Flow rate.** The L/min conversion is `(pulses / K) x (60000 / interval_ms)`, which is
+dimensionally correct — so a reading that is "way off" means `K`, the pulses-per-litre
+figure, does not match the turbine actually fitted. 450 is the YF-S201 value
+(F = 7.5 x Q L/min); other turbines differ by an order of magnitude (a YF-S402 is nearer
+5880), which is exactly the kind of error that looks like a unit problem.
 
-**Flow rate.** `450.0` pulses per litre, correct for a YF-S201. A different turbine means a
-different K-factor — it is the only constant in `calculateFlowRate()`.
-
-**Temperature sensor order.** The four DS18B20s are addressed by discovery index on a
-shared bus, not by ROM address, so **replacing or rewiring a sensor can silently reshuffle
-which reading is which**. The board publishes all four raw indices to
-`Debug/SensorIndex_0`…`_3` every 30 s for exactly this reason. After any bus work, warm one
-sensor by hand and watch which index moves:
+`K` is no longer hardcoded. Measure it with a bucket test:
 
 ```bash
-mosquitto_sub -h 192.168.8.1 -t 'Debug/SensorIndex_+' -v
+mosquitto_pub -h 192.168.8.1 -t HotWaterFlowCalibrateCommand -m START
+# run water into a measured container, then tell the board what came out
+mosquitto_pub -h 192.168.8.1 -t HotWaterFlowCalibrateCommand -m 1G
 ```
 
-Expected order is `0` return manifold, `1` hydronic, `2` grey tank, `3` fresh tank.
+A trailing `G` is US gallons, `L` or a bare number is litres. The board computes
+`K = pulses / litres`, saves it to NVS, and republishes `HotWaterFlowKFactor`. It rejects
+runs under 100 pulses and any result outside 50–20000 pulses/L. *Start Flow Calibration*
+in Home Assistant sends the `START` step.
+
+The larger the measured volume, the better the result — a gallon is far more accurate than
+a cup. `HotWaterFlowPulses` (raw count since boot) is published as a diagnostic if you
+would rather compute `K` by hand.
+
+Rate is published in both `HotWaterFlowRate` (L/min) and `HotWaterFlowRateGPM`, with
+running totals on `HotWaterFlowTotal` and `HotWaterFlowTotalGal`. Totals are per-boot and
+are derived from the pulse count at publish time, so recalibrating `K` corrects them
+retroactively.
+
+**Temperature harness.** The five DS18B20s are bound to harness positions by 64-bit ROM
+address, held in NVS — never by discovery index. Replacing or rewiring a probe cannot
+reshuffle which reading is which; a replaced probe simply reports as missing until it is
+bound.
+
+| Position key | Reading | Topic |
+|---|---|---|
+| `supply_manifold` | Supply manifold | `PlumbingTempSupplyManifold` |
+| `return_manifold` | Return manifold | `PlumbingTempReturnManifold` |
+| `buffer_tank` | Hydronic buffer tank | `HydronicTemperature` |
+| `grey_tank` | Grey water tank | `GreyWaterTemperature` |
+| `fresh_tank` | Fresh water tank | `FreshWaterTemperature` |
+
+**Binding a probe by hand.** Press *Identify \<position\>* in Home Assistant, then hold that
+probe in your hand. The board snapshots every sensor and watches for 60 s; the one that
+rises ≥4 °F, beating the runner-up by ≥2 °F, takes the position and is saved to NVS. The
+margin is what stops a bundle of probes in the same warm bay producing a coin-flip. Watch
+it happen on serial, or on the *Temp Identify State* entity.
+
+```bash
+mosquitto_pub -h 192.168.8.1 -t PlumbingTempIdentifyCommand -m grey_tank
+```
+
+**Binding by address**, when the ROM is already known from a bus report:
+
+```bash
+mosquitto_pub -h 192.168.8.1 -t PlumbingTempAssignCommand -m 'grey_tank=28FF641E1234ABCD'
+```
+
+A bus index from the report works too (`grey_tank=2`), and an empty value clears the
+position. `PlumbingTempSensorCommand` takes `SCAN`, `REPORT`, and `CLEAR`.
+
+**Checking the harness.** `PlumbingTempSensorsFound` counts devices on the bus,
+`PlumbingTempSensorsLive` counts positions bound and reading, and `PlumbingTempSensorScan`
+carries the full map as JSON. Each position also drives `PlumbingTempPresence/<key>`, which
+is a Home Assistant availability topic — a probe that drops off reads *unavailable* rather
+than freezing on its last value.
+
+**Why a probe is failing.** Each sensor in `PlumbingTempSensorScan` carries `reads` and
+`errors` counts, and the JSON carries `parasite` (true if any probe reports parasite
+power — a missing VDD wire). While a read is failing, the sensor also gets `err` and `sp`
+(the raw 9-byte scratchpad that failed). The scan is republished every 60 s while anything
+is failing, and on demand with *Print Temp Bus Report*. Each read is retried once.
+
+| `err` | Meaning | Usual cause |
+|---|---|---|
+| `no_presence` | No presence pulse on reset | Bus shorted or open, or a device holding the line low |
+| `no_reply` | Scratchpad all `FF` — nothing answered its address | Probe lost power mid-bus, marginal signalling |
+| `all_zero` | Scratchpad all `00` | Data line held low during the read |
+| `crc` | Scratchpad CRC mismatch | Pullup value, run length, star wiring, a bad splice, two devices answering |
+| `power_on_85C` | 85 °C power-on value — conversion never ran | VDD missing or too weak (parasite power) |
+| `range` | Outside −67…257 °F | Probe past its rating |
+
+**Range limit.** A DS18B20 is rated −55…+125 °C. Readings outside −67…257 °F are counted as
+failed reads, not temperatures. The boiler exhaust position was removed for this reason — an
+exhaust outlet runs well past the part's rating, and measuring it wants a K-type thermocouple
+and a MAX31855/31856 on its own channel.
+
+---
+
+## Retired entities
+
+Removing a feature from the firmware does not remove it from Home Assistant. Discovery
+configs and state values are published **retained**, so the broker keeps serving them to HA
+forever unless something overwrites them with an empty retained message.
+
+`publishHomeAssistantDiscovery()` ends with a block that does exactly that, for:
+
+| Entity | Why it went |
+|---|---|
+| Hot Water Pump Speed / Status / Pressure, Pump Error | PWM pump controller no longer fitted |
+| Manifold Pressure | transducer removed |
+| Diesel Heater (`select`) | replaced by a plain switch |
+
+It runs on every MQTT connect and is idempotent, so it can stay indefinitely. To retire
+something else later, add it to `retiredDiscovery` (the HA entity) and `retiredTopics` (its
+retained state), or clear one by hand:
+
+```bash
+mosquitto_pub -h 192.168.8.1 -t 'homeassistant/sensor/chester_plumbing/<object_id>/config' -r -n
+mosquitto_pub -h 192.168.8.1 -t '<StateTopic>' -r -n
+```
 
 ---
 
@@ -242,6 +384,10 @@ pio run -t upload
 `platformio.ini` is configured for OTA to `Plumbing.local`. Comment out the `upload_*`
 block for a USB flash. Serial monitor is 115200 baud.
 
-The boot banner reports firmware version, every DS18B20 address found with its index,
-BME280 presence, and the full restored relay state — read it after any flash to confirm
-the sensor bus and outputs came back the way you expect.
+The boot banner reports firmware version, the restored harness positions, a full OneWire
+bus table, BME280 presence, and the restored relay state — read it after any flash to
+confirm the sensor bus and outputs came back the way you expect.
+
+On the first boot after upgrading from `v3.1.0` no positions are bound, so every
+temperature reads unavailable, `PlumbingAlert` names all five, and freeze protection is
+inactive until you bind them. Identify each probe once and it persists.
