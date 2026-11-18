@@ -2,13 +2,14 @@
 #include <PubSubClient.h>
 #include <Servo.h>
 #include <ArduinoOTA.h>
+#include <EEPROM.h>
 
 // ============================================
 // CONFIGURATION - Change for each D1 Mini
 // ============================================
 // Set unique cabinet identifier for each D1 Mini
 #define CABINET_ID "RearDriverSide"  // Options: kitchen1, kitchen2, bathroom, bedroom, etc.
-#define FIRMWARE_VERSION "v3.0.0"
+#define FIRMWARE_VERSION "v3.1.0"
 
 // WiFi Configuration
 const char* ssid = "Chester IOT";
@@ -39,6 +40,15 @@ Servo lockServo;
 // Lock positions (adjust based on your servo/latch mechanism)
 #define LOCKED_POSITION 90
 #define UNLOCKED_POSITION 5
+const unsigned long SERVO_MOVE_MS = 500;  // Time the servo is driven before it is released
+
+// Lock state is persisted so a reboot (e.g. a brownout while cranking the
+// engine) puts the latch back where it was instead of reporting a state the
+// servo was never actually driven to.
+#define EEPROM_SIZE 8
+#define EEPROM_MAGIC 0xCB
+#define EEPROM_ADDR_MAGIC 0
+#define EEPROM_ADDR_STATE 1
 
 // MQTT Client
 WiFiClient wifiClient;
@@ -55,6 +65,14 @@ LockState currentState = STATE_UNKNOWN;
 unsigned long lastStatusUpdate = 0;
 const unsigned long STATUS_INTERVAL = 60000; // Send status every 60 seconds
 
+// Networking (non-blocking - the loop never stalls waiting for WiFi or the broker)
+const unsigned long WIFI_KICK_MS = 30000;   // Restart the WiFi attempt this often while down
+const unsigned long MQTT_RETRY_MS = 5000;   // Broker connection attempt interval
+unsigned long lastWifiKick = 0;
+unsigned long lastMqttAttempt = 0;
+bool otaStarted = false;
+bool wifiWasConnected = false;
+
 // Command deduplication
 String lastCommand = "";
 unsigned long lastCommandTime = 0;
@@ -68,6 +86,36 @@ void lockCabinet();
 void unlockCabinet();
 void sendStatus();
 void processCommand(String command);
+void setupOTA();
+
+// ============================================================================
+// LOCK STATE PERSISTENCE
+// ============================================================================
+void saveLockState() {
+  // ESP8266 EEPROM only writes flash when a byte actually changed
+  EEPROM.write(EEPROM_ADDR_MAGIC, EEPROM_MAGIC);
+  EEPROM.write(EEPROM_ADDR_STATE, (uint8_t)currentState);
+  EEPROM.commit();
+}
+
+LockState loadLockState() {
+  if (EEPROM.read(EEPROM_ADDR_MAGIC) == EEPROM_MAGIC) {
+    uint8_t s = EEPROM.read(EEPROM_ADDR_STATE);
+    if (s == STATE_LOCKED || s == STATE_UNLOCKED) return (LockState)s;
+  }
+  return STATE_UNLOCKED;  // Nothing saved yet
+}
+
+// Drive the servo to a position long enough for it to get there, then release it
+void moveServo(int position) {
+  if (!lockServo.attached()) {
+    lockServo.attach(SERVO_PIN);
+  }
+  lockServo.write(position);
+  delay(SERVO_MOVE_MS);
+  // Disable servo to save power and reduce noise
+  lockServo.detach();
+}
 
 // MQTT Callback function
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -154,50 +202,96 @@ void publishHomeAssistantDiscovery() {
   Serial.println("✓ Home Assistant Discovery published");
 }
 
+// One connection attempt at most every MQTT_RETRY_MS. This used to loop until
+// connected, which stopped OTA and WiFi recovery for as long as the broker was
+// unreachable.
 void reconnectMQTT() {
-  // Loop until we're reconnected
-  while (!mqttClient.connected()) {
-    Serial.print("Attempting MQTT connection to ");
-    Serial.print(mqtt_server);
-    Serial.print(":");
-    Serial.print(mqtt_port);
-    Serial.print(" as client: ");
-    Serial.print(mqtt_client_id);
-    Serial.print("...");
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (lastMqttAttempt != 0 && millis() - lastMqttAttempt < MQTT_RETRY_MS) return;
+  lastMqttAttempt = millis();
 
-    // Connect with or without credentials
-    bool connected;
-    if (strlen(mqtt_user) > 0) {
-      connected = mqttClient.connect(mqtt_client_id.c_str(), mqtt_user, mqtt_password);
-    } else {
-      connected = mqttClient.connect(mqtt_client_id.c_str());
-    }
+  Serial.print("Attempting MQTT connection to ");
+  Serial.print(mqtt_server);
+  Serial.print(":");
+  Serial.print(mqtt_port);
+  Serial.print(" as client: ");
+  Serial.print(mqtt_client_id);
+  Serial.print("...");
 
-    if (connected) {
-      Serial.println("connected");
-
-      // Publish Home Assistant discovery
-      publishHomeAssistantDiscovery();
-
-      // Subscribe to individual command topic
-      mqttClient.subscribe(topic_cabinetLock_command.c_str());
-      Serial.print("Subscribed to: ");
-      Serial.println(topic_cabinetLock_command);
-
-      // Subscribe to group command topic (for controlling all locks at once)
-      mqttClient.subscribe(topic_allLock_command);
-      Serial.print("Subscribed to: ");
-      Serial.println(topic_allLock_command);
-
-      // Send initial status
-      sendStatus();
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
+  // Connect with or without credentials
+  bool connected;
+  if (strlen(mqtt_user) > 0) {
+    connected = mqttClient.connect(mqtt_client_id.c_str(), mqtt_user, mqtt_password);
+  } else {
+    connected = mqttClient.connect(mqtt_client_id.c_str());
   }
+
+  if (connected) {
+    Serial.println("connected");
+
+    // Publish Home Assistant discovery
+    publishHomeAssistantDiscovery();
+
+    // Subscribe to individual command topic
+    mqttClient.subscribe(topic_cabinetLock_command.c_str());
+    Serial.print("Subscribed to: ");
+    Serial.println(topic_cabinetLock_command);
+
+    // Subscribe to group command topic (for controlling all locks at once)
+    mqttClient.subscribe(topic_allLock_command);
+    Serial.print("Subscribed to: ");
+    Serial.println(topic_allLock_command);
+
+    // Send initial status
+    sendStatus();
+  } else {
+    Serial.print("failed, rc=");
+    Serial.print(mqttClient.state());
+    Serial.println(" - retrying in 5 seconds");
+  }
+}
+
+void setupOTA() {
+  ArduinoOTA.setHostname(otaHostname);
+  ArduinoOTA.setPassword(otaPassword);
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("\n🔄 OTA Update Starting...");
+    // Detach servo during update for safety
+    if (lockServo.attached()) {
+      lockServo.detach();
+    }
+  });
+
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\n✓ OTA Update Complete! Rebooting...");
+  });
+
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    static int lastPercent = -1;
+    if (total == 0) return;
+    int percentComplete = (int)((progress * 100ULL) / total);
+    if (percentComplete != lastPercent && percentComplete % 10 == 0) {
+      Serial.printf("   Progress: %u%%\n", percentComplete);
+      lastPercent = percentComplete;
+    }
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("\n✗ OTA Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Authentication Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
+  ArduinoOTA.begin();
+  otaStarted = true;
+  Serial.println("✓ OTA enabled");
+  Serial.print("  Hostname: ");
+  Serial.print(otaHostname);
+  Serial.println(".local");
 }
 
 void setup() {
@@ -212,18 +306,28 @@ void setup() {
   Serial.print("Status Topic: ");
   Serial.println(topic_cabinetLock_status);
 
-  // Initialize servo
-  lockServo.attach(SERVO_PIN);
-  lockServo.write(UNLOCKED_POSITION);
-  currentState = STATE_UNLOCKED;
-  lockServo.detach();
-  Serial.println("Servo initialized at UNLOCKED position");
+  // Restore the saved lock position. Previously the servo was attached and
+  // detached with no delay, so it never actually moved, yet UNLOCKED was reported.
+  EEPROM.begin(EEPROM_SIZE);
+  currentState = loadLockState();
+  moveServo(currentState == STATE_LOCKED ? LOCKED_POSITION : UNLOCKED_POSITION);
+  Serial.print("Servo restored to ");
+  Serial.println(currentState == STATE_LOCKED ? "LOCKED" : "UNLOCKED");
+
+  // MQTT is configured whether or not WiFi is up yet. It used to be set up only
+  // when WiFi connected within 20 s of boot - if the router came up later (a
+  // whole-bus power-up), the lock never reached the broker until power-cycled.
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(mqttCallback);
+  mqttClient.setBufferSize(1024);
 
   // Connect to WiFi
   Serial.print("Connecting to WiFi: ");
   Serial.println(ssid);
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
+  lastWifiKick = millis();
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 40) {
@@ -238,80 +342,27 @@ void setup() {
     Serial.println(WiFi.localIP());
     Serial.print("MAC address: ");
     Serial.println(WiFi.macAddress());
+    wifiWasConnected = true;
 
-    // Setup OTA (Over-The-Air) updates
-    ArduinoOTA.setHostname(otaHostname);
-    ArduinoOTA.setPassword(otaPassword);
-
-    ArduinoOTA.onStart([]() {
-      Serial.println("\n🔄 OTA Update Starting...");
-      // Detach servo during update for safety
-      if (lockServo.attached()) {
-        lockServo.detach();
-      }
-    });
-
-    ArduinoOTA.onEnd([]() {
-      Serial.println("\n✓ OTA Update Complete! Rebooting...");
-    });
-
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-      static int lastPercent = -1;
-      int percentComplete = (progress / (total / 100));
-      if (percentComplete != lastPercent && percentComplete % 10 == 0) {
-        Serial.printf("   Progress: %u%%\n", percentComplete);
-        lastPercent = percentComplete;
-      }
-    });
-
-    ArduinoOTA.onError([](ota_error_t error) {
-      Serial.printf("\n✗ OTA Error[%u]: ", error);
-      if (error == OTA_AUTH_ERROR) Serial.println("Authentication Failed");
-      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-      else if (error == OTA_END_ERROR) Serial.println("End Failed");
-    });
-
-    ArduinoOTA.begin();
-    Serial.println("✓ OTA enabled");
-    Serial.print("  Hostname: ");
-    Serial.print(otaHostname);
-    Serial.println(".local");
-
-    // Setup MQTT
-    mqttClient.setServer(mqtt_server, mqtt_port);
-    mqttClient.setCallback(mqttCallback);
-    mqttClient.setBufferSize(1024);
-
-    // Connect to MQTT broker
+    setupOTA();
     reconnectMQTT();
-
-    Serial.println("Ready to receive lock/unlock commands via MQTT!");
-    Serial.println("Commands: LOCK, UNLOCK, TOGGLE, STATUS");
-    Serial.print("Firmware: ");
-    Serial.println(FIRMWARE_VERSION);
   } else {
-    Serial.println("\nWiFi connection failed!");
-    Serial.println("Will retry in loop...");
+    Serial.println("\nWiFi not up yet - will keep trying from the loop");
   }
+
+  Serial.println("Ready to receive lock/unlock commands via MQTT!");
+  Serial.println("Commands: LOCK, UNLOCK, TOGGLE, STATUS");
+  Serial.print("Firmware: ");
+  Serial.println(FIRMWARE_VERSION);
 }
 
 void lockCabinet() {
   Serial.print(">>> LOCKING Cabinet: ");
   Serial.println(CABINET_ID);
 
-  // Ensure servo is attached before moving
-  if (!lockServo.attached()) {
-    lockServo.attach(SERVO_PIN);
-  }
-
-  lockServo.write(LOCKED_POSITION);
+  moveServo(LOCKED_POSITION);
   currentState = STATE_LOCKED;
-  delay(500);  // Give servo time to move
-
-  // Disable servo to save power and reduce noise
-  lockServo.detach();
+  saveLockState();
   Serial.println("Servo disabled after locking");
 
   // Publish status via MQTT
@@ -325,17 +376,9 @@ void unlockCabinet() {
   Serial.print(">>> UNLOCKING Cabinet: ");
   Serial.println(CABINET_ID);
 
-  // Ensure servo is attached before moving
-  if (!lockServo.attached()) {
-    lockServo.attach(SERVO_PIN);
-  }
-
-  lockServo.write(UNLOCKED_POSITION);
+  moveServo(UNLOCKED_POSITION);
   currentState = STATE_UNLOCKED;
-  delay(500);  // Give servo time to move
-
-  // Disable servo to save power and reduce noise
-  lockServo.detach();
+  saveLockState();
   Serial.println("Servo disabled after unlocking");
 
   // Publish status via MQTT
@@ -366,23 +409,30 @@ void sendStatus() {
 }
 
 void loop() {
-  // Ensure WiFi is connected
+  // WiFi: the core reconnects on its own; only restart the attempt occasionally
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected, reconnecting...");
-    WiFi.begin(ssid, password);
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-      delay(500);
-      Serial.print(".");
-      attempts++;
+    if (wifiWasConnected) {
+      wifiWasConnected = false;
+      Serial.println("WiFi disconnected (auto-reconnect running)");
     }
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nWiFi reconnected!");
+    if (millis() - lastWifiKick >= WIFI_KICK_MS) {
+      lastWifiKick = millis();
+      Serial.println("WiFi still down - restarting connection attempt");
+      WiFi.begin(ssid, password);
     }
+  } else if (!wifiWasConnected) {
+    wifiWasConnected = true;
+    Serial.print("WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
   }
 
-  // Handle OTA updates
-  ArduinoOTA.handle();
+  // OTA starts the first time WiFi is up, even if that is long after boot
+  if (!otaStarted && WiFi.status() == WL_CONNECTED) {
+    setupOTA();
+  }
+  if (otaStarted) {
+    ArduinoOTA.handle();
+  }
 
   // Keep MQTT connection alive
   if (!mqttClient.connected()) {
