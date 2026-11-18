@@ -7,7 +7,7 @@ read directly from the firmware sources listed under each board.
 
 ## System Overview
 
-Seven independently-flashed boards on a private WiFi network, coordinating exclusively
+Eight independently-flashed boards on a private WiFi network, coordinating exclusively
 through a Mosquitto MQTT broker. There is no central controller: each board owns its own
 hardware, persists its own state, and publishes retained status so the broker (and Home
 Assistant) can be resynchronised at any time.
@@ -20,13 +20,13 @@ Assistant) can be resynchronised at any time.
                      │  Home Assistant (MQTT discovery)     │
                      └──────────────┬───────────────────────┘
                                     │
-   ┌──────────────┬─────────────────┼──────────────┬────────────────┐
-   │              │                 │              │                │
-┌──┴────────┐ ┌───┴──────────┐ ┌────┴────────┐ ┌───┴──────────┐ ┌───┴──────────┐
-│ Plumbing  │ │FrontThermo-  │ │AltInverter- │ │ HX-Bypass    │ │ 3 × CabLock  │
-│ ESP32-S2  │ │stat ESP32-S2 │ │Charger S2   │ │ D1 Mini      │ │ D1 Mini Lite │
-│ v3.1.0    │ │ v4.1.0       │ │ v1.1.0      │ │ v1.0.0       │ │ v3.0.0       │
-└───────────┘ └──────────────┘ └─────────────┘ └──────────────┘ └──────────────┘
+   ┌──────────────┬─────────────────┼──────────────┬────────────────┬────────────────┐
+   │              │                 │              │                │                │
+┌──┴────────┐ ┌───┴──────────┐ ┌────┴────────┐ ┌───┴──────────┐ ┌───┴──────────┐ ┌───┴──────────┐
+│ Plumbing  │ │FrontThermo-  │ │AltInverter- │ │ HX-Bypass    │ │ 3 × CabLock  │ │TempSensorBus │
+│ ESP32-S2  │ │stat ESP32-S2 │ │Charger S2   │ │ D1 Mini      │ │ D1 Mini Lite │ │ ESP32-S2     │
+│ v3.5.0    │ │ v5.2.0       │ │ v1.1.1      │ │ v1.0.1       │ │ v3.1.0       │ │ v1.1.1       │
+└───────────┘ └──────────────┘ └─────────────┘ └──────────────┘ └──────────────┘ └──────────────┘
 ```
 
 Common to every board:
@@ -46,7 +46,7 @@ Credentials are hardcoded in each `src/main.cpp`. There is no `secrets.h` indire
 
 ## 1. Plumbing — ESP32-S2 Mini
 
-**Source:** `Plumbing/src/main_esp32s2.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v3.1.0`
+**Source:** `Plumbing/src/main_esp32s2.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v3.5.0`
 **OTA host:** `Plumbing.local` · **MQTT client id:** `ESP32S2_Plumbing`
 
 The largest board and the authoritative source of truth for every hydronic valve and
@@ -71,7 +71,6 @@ heater state. It also carries the *RearPassSide* cabinet lock servo (`CABINET_ID
 | GPIO6 | Diesel heater relay 3 (yellow wire) | Active LOW |
 | GPIO37 | Electric heater relay | **Active HIGH** — HIGH = ON |
 | GPIO16 | Cabinet lock servo (RearPassSide) | 50 Hz, 500–2400 µs, detached when idle |
-| GPIO1 | Manifold pressure sensor | ADC1_CH0, 12-bit |
 | GPIO17 | Flow sensor pulse input | `INPUT_PULLUP`, FALLING-edge interrupt |
 | GPIO33 | BME280 SDA | I²C |
 | GPIO35 | BME280 SCL | I²C |
@@ -79,27 +78,33 @@ heater state. It also carries the *RearPassSide* cabinet lock servo (`CABINET_ID
 The main water pump relay is the one inverted output on the board — it is wired normally
 closed so that a dead board leaves the pump running rather than dead.
 
-### DS18B20 index map
+### DS18B20 harness — five probes, addressed by ROM
 
-All four sensors share the GPIO13 bus and are addressed by discovery index, not by ROM
-address. **Physical bus order determines which reading is which.**
+Five sensors share the GPIO13 bus. Each harness position is bound to a sensor's 64-bit ROM
+address, stored in NVS (`plumbing` namespace, keys `ts_supply`, `ts_return`, `ts_buffer`,
+`ts_grey`, `ts_fresh` — keyed to the position, so removing a position never reshuffles the
+rest). **Discovery index is not used.** Index order is ROM-address order, so it shifts whenever a probe is added, replaced,
+or drops off the bus — on a bus that drives tank heaters, silently swapping two readings is
+not an acceptable failure mode.
 
-| Index | Sensor | Filtered? |
-|---|---|---|
-| 0 | Return manifold | no |
-| 1 | Hydronic tank | no |
-| 2 | Grey water tank | 5-sample moving average |
-| 3 | Fresh water tank | 5-sample moving average |
+| Position key | Reading | Topic | Filtered? |
+|---|---|---|---|
+| `supply_manifold` | Supply manifold | `PlumbingTempSupplyManifold` | no |
+| `return_manifold` | Return manifold | `PlumbingTempReturnManifold` | no |
+| `buffer_tank` | Hydronic buffer tank | `HydronicTemperature` | no |
+| `grey_tank` | Grey water tank | `GreyWaterTemperature` | 5-sample moving average |
+| `fresh_tank` | Fresh water tank | `FreshWaterTemperature` | 5-sample moving average |
 
-Every 30 s the board publishes all four raw indices to `Debug/SensorIndex_0` … `_3` so the
-mapping can be verified against physical reality after any bus rewire.
+Positions are labelled by hand: press a position's Identify button in Home Assistant, warm
+that probe, and the sensor that rises ≥4 °F — beating the runner-up by ≥2 °F — takes the
+position. Conversions are non-blocking; the bus is re-enumerated only while a position is
+missing, so a healthy harness generates no search traffic at all.
 
 ### Sensor conversions
 
 - **Temperatures** — read in °C, converted to °F for all state and MQTT. `-999.0` is the
-  sentinel for a disconnected sensor and suppresses publication.
-- **Manifold pressure** — `analogRead` (12-bit), subtract an ADC zero offset of **580
-  counts**, scale to voltage over 3.3 V, then `PSI = (V / 3.3) × 80`. Clamped to 0–85 PSI.
+  sentinel for a disconnected sensor and suppresses publication. Readings outside
+  −67…257 °F (the DS18B20's rated range) are treated as failed reads.
 - **Flow rate** — 450 pulses per litre (YF-S201 class sensor), recomputed every 1000 ms.
 - **BME280** — auto-probed at `0x76`, falling back to `0x77`. Temperature published in °F,
   pressure in hPa.
@@ -110,7 +115,8 @@ mapping can be verified against physical reality after any bus rewire.
 |---|---|
 | Pressure read | 1 s |
 | Flow calculation + publish | 1 s |
-| Temperature read, BME280, automation, alert check | 5 s |
+| Temperature collect + next conversion started, BME280, automation, alerts | 5 s |
+| OneWire re-enumeration | 60 s, **only while a position is missing** |
 | Status publish (pressure, pump, mode, setpoints) | 10 s |
 | Health publish (uptime, ONLINE, firmware) | 60 s |
 | WiFi liveness check | 10 s |
@@ -123,6 +129,9 @@ mapping can be verified against physical reality after any bus rewire.
   Detached during OTA and reattached on completion or error.
 - **Network** — after 8 consecutive WiFi/MQTT failures the board calls `ESP.restart()`.
 - **Last Will** — broker publishes `OFFLINE` to `PlumbingSystemStatus` on unexpected drop.
+- **Probe-loss fail-safe** — in AUTO, a tank heater whose own probe has been missing for
+  60 s is switched OFF. Without it the heater has no control input and would stay energised
+  indefinitely. Governed by `TEMP_PROBE_LOSS_FAILSAFE` in the source.
 
 Behaviour, automation rules, and safety interlocks: **[Plumbing/README.md](Plumbing/README.md)**
 
@@ -130,7 +139,7 @@ Behaviour, automation rules, and safety interlocks: **[Plumbing/README.md](Plumb
 
 ## 2. FrontThermostat — ESP32-S2 Mini
 
-**Source:** `FrontThermostat/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v4.1.0`
+**Source:** `FrontThermostat/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v5.2.0`
 **OTA host:** `Thermostat-KitchenPassSide.local` · **Cabinet ID:** `KitchenPassSide`
 
 Front-zone climate control with a PI-controlled hydronic fan coil. It does not switch any
@@ -162,7 +171,7 @@ Behaviour, PI tuning, and button semantics: **[FrontThermostat/README.md](FrontT
 
 ## 3. AltInverterCharger — ESP32-S2 Mini
 
-**Source:** `AltInverterCharger/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v1.1.0`
+**Source:** `AltInverterCharger/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v1.1.1`
 **OTA host:** `AltInverterCharger.local`
 
 Pulses the inverter's momentary power button and monitors its supply battery.
@@ -183,7 +192,7 @@ Calibration, safety rate-limits, and topic list: **[AltInverterCharger/README.md
 
 ## 4. HX-Bypass — Wemos D1 Mini (ESP8266)
 
-**Source:** `HX-Bypass/src/main.cpp` · **Env:** `d1_mini` · **Firmware:** `v1.0.0`
+**Source:** `HX-Bypass/src/main.cpp` · **Env:** `d1_mini` · **Firmware:** `v1.0.1`
 **OTA host:** `HX-Bypass.local` · **Static IP:** `192.168.8.140`
 
 Drives the heat-exchanger bypass valve for engine coolant. The only board with a static IP
@@ -203,7 +212,7 @@ Control logic: **[HX-Bypass/README.md](HX-Bypass/README.md)**
 
 ## 5–7. Cabinet Locks — D1 Mini Lite (ESP8266) ×3
 
-**Envs:** `d1_mini_lite` · **Firmware:** `v3.0.0`
+**Envs:** `d1_mini_lite` · **Firmware:** `v3.1.0`
 
 | Directory | `CABINET_ID` | OTA hostname |
 |---|---|---|
@@ -219,6 +228,53 @@ Servo positions are `LOCKED_POSITION 90` and `UNLOCKED_POSITION 5` on every lock
 the system, including the two servos hosted on the ESP32-S2 boards.
 
 Full behaviour and the per-board source differences: **[CABINET_LOCKS.md](CABINET_LOCKS.md)**
+
+---
+
+## 8. TempSensorBus — ESP32-S2 Mini
+
+**Source:** `TempSensorBus/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v1.1.1`
+**OTA host:** `TempSensorBus.local`
+
+Bring-up rig for the five-sensor hydronic temperature harness. Not a control board — it
+reads, reports, and helps label sensors while the harness is being built.
+
+| Pin | Signal | Notes |
+|---|---|---|
+| GPIO13 | DS18B20 OneWire bus | Shared bus, 6 sensors, 12-bit; one 4.7 kΩ pullup to 3.3 V at the controller end |
+| GPIO15 | Status LED | Onboard LED — solid when all roles are live, blinking otherwise |
+
+Same bus pin as the Plumbing board, so a harness can be moved between the two unchanged.
+
+### Role map — by ROM address, not index
+
+| Role key | Sensor |
+|---|---|
+| `supply_manifold` | Supply manifold |
+| `return_manifold` | Return manifold |
+| `buffer_tank` | Buffer tank |
+| `grey_tank` | Grey tank |
+| `fresh_tank` | Fresh tank |
+
+Each role stores the sensor's 64-bit ROM address in NVS (`tempbus` namespace, keys `a_supply`,
+`a_return`, `a_buffer`, `a_grey`, `a_fresh` — keyed to the role, not to its position in the
+table). Discovery index is never used: it shifts whenever a sensor is added, removed, or
+replaced, and on a shared bus that silently swaps readings.
+Addresses do not shift.
+
+The board re-enumerates the bus every 30 s, so a sensor spliced in mid-build appears without
+a reboot. Roles are bound either by publishing the address directly or by identify-by-warming
+— press the role's button, warm that sensor by hand, and the sensor that rises fastest takes
+the role.
+
+### No exhaust channel on this bus
+
+The boiler exhaust position was removed. A DS18B20 is rated −55 to +125 °C and diesel heater
+exhaust at the outlet runs well past that, so measuring it needs a K-type thermocouple
+(MAX31855/31856) on its own channel rather than a probe on this bus. Readings outside
+−67…257 °F are still counted as errors and logged rather than published.
+
+Wiring, debug topics, and the symptom table: **[TempSensorBus/README.md](TempSensorBus/README.md)**
 
 ---
 

@@ -1,6 +1,6 @@
 # Chester the Bus — RV Control System
 
-Firmware for the automation and monitoring system in a bus conversion. Seven independently
+Firmware for the automation and monitoring system in a bus conversion. Eight independently
 flashed microcontrollers handle hydronic heating, water, climate, power, and cabinet
 security, coordinating entirely through MQTT and surfacing in Home Assistant.
 
@@ -14,13 +14,14 @@ time.
 
 | Project | Hardware | Firmware | Responsibility |
 |---|---|---|---|
-| [`Plumbing`](Plumbing/) | ESP32-S2 Mini | `v3.1.0` | Hydronic valves, tank heaters, diesel + electric heat, water pump, exhaust fan, DHW solenoid, 4× DS18B20, BME280, pressure, flow, RearPassSide lock |
-| [`FrontThermostat`](FrontThermostat/) | ESP32-S2 Mini | `v4.1.0` | Front zone PI climate control, fan coil, OLED, buttons, KitchenPassSide lock |
-| [`AltInverterCharger`](AltInverterCharger/) | ESP32-S2 Mini | `v1.1.0` | Inverter power button pulse, battery voltage, DS18B20 |
-| [`HX-Bypass`](HX-Bypass/) | Wemos D1 Mini | `v1.0.0` | Engine-coolant heat exchanger bypass valve |
-| [`D1Mini_CabLock_KitchenDriverSide`](D1Mini_CabLock_KitchenDriverSide/) | D1 Mini Lite | `v3.0.0` | Cabinet lock servo |
-| [`D1Mini_CabLock_KitchenUpperPassSide`](D1Mini_CabLock_KitchenUpperPassSide/) | D1 Mini Lite | `v3.0.0` | Cabinet lock servo |
-| [`D1Mini_CabLock_RearDriverSide`](D1Mini_CabLock_RearDriverSide/) | D1 Mini Lite | `v3.0.0` | Cabinet lock servo |
+| [`Plumbing`](Plumbing/) | ESP32-S2 Mini | `v3.5.0` | Hydronic valves, tank heaters, diesel + electric heat, water pump, exhaust fan, DHW solenoid, 5× DS18B20 (ROM-addressed), BME280, pressure, flow, RearPassSide lock |
+| [`FrontThermostat`](FrontThermostat/) | ESP32-S2 Mini | `v5.2.0` | Front zone PI climate control, fan coil, OLED, buttons, KitchenPassSide lock |
+| [`AltInverterCharger`](AltInverterCharger/) | ESP32-S2 Mini | `v1.1.1` | Inverter power button pulse, battery voltage, DS18B20 |
+| [`HX-Bypass`](HX-Bypass/) | Wemos D1 Mini | `v1.0.1` | Engine-coolant heat exchanger bypass valve |
+| [`TempSensorBus`](TempSensorBus/) | ESP32-S2 Mini | `v1.1.1` | Harness bring-up rig — 5× DS18B20 on one OneWire bus, address-based role assignment, identify-by-warming |
+| [`D1Mini_CabLock_KitchenDriverSide`](D1Mini_CabLock_KitchenDriverSide/) | D1 Mini Lite | `v3.1.0` | Cabinet lock servo |
+| [`D1Mini_CabLock_KitchenUpperPassSide`](D1Mini_CabLock_KitchenUpperPassSide/) | D1 Mini Lite | `v3.1.0` | Cabinet lock servo |
+| [`D1Mini_CabLock_RearDriverSide`](D1Mini_CabLock_RearDriverSide/) | D1 Mini Lite | `v3.1.0` | Cabinet lock servo |
 
 ---
 

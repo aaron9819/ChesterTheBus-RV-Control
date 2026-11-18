@@ -11,6 +11,7 @@ the OTA password `Chester2025`.
 | `FrontThermostat` | ESP32-S2 Mini | `Thermostat-KitchenPassSide.local` | 3232 | yes |
 | `AltInverterCharger` | ESP32-S2 Mini | `AltInverterCharger.local` | 3232 | yes |
 | `HX-Bypass` | D1 Mini | `HX-Bypass.local` | 8266 | **no — commented out** |
+| `TempSensorBus` | ESP32-S2 Mini | `TempSensorBus.local` | 3232 | yes |
 | `D1Mini_CabLock_KitchenDriverSide` | D1 Mini Lite | `CabLock-KitchenDriverSide.local` | 8266 | yes |
 | `D1Mini_CabLock_KitchenUpperPassSide` | D1 Mini Lite | `CabLock-KitchenUpperPassSide.local` | 8266 | yes |
 | `D1Mini_CabLock_RearDriverSide` | D1 Mini Lite | `CabLock-RearDriverSide.local` | 8266 | yes |

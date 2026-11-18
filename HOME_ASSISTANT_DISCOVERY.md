@@ -48,7 +48,6 @@ a select, and a lock.
 | Ambient Temperature | temperature | °F | `EnvironmentTempAmbient` |
 | Humidity | humidity | % | `EnvironmentHumidity` |
 | Atmospheric Pressure | pressure | hPa | `EnvironmentPressure` |
-| Manifold Pressure | pressure | PSI | `ManifoldPressure` |
 | Hot Water Flow Rate | — | L/min | `HotWaterFlowRate` |
 | Hot Water Flow Status | — | — | `HotWaterFlowStatus` |
 | Plumbing Alerts | — | — | `PlumbingAlert` |

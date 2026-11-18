@@ -5,11 +5,11 @@ are hosted on larger controllers that had a spare GPIO.
 
 | Cabinet | Host | Servo pin | Firmware |
 |---|---|---|---|
-| KitchenDriverSide | `D1Mini_CabLock_KitchenDriverSide` | D4 (GPIO2) | `v3.0.0` |
-| KitchenUpperPassSide | `D1Mini_CabLock_KitchenUpperPassSide` | D4 (GPIO2) | `v3.0.0` |
-| RearDriverSide | `D1Mini_CabLock_RearDriverSide` | D4 (GPIO2) | `v3.0.0` |
-| KitchenPassSide | `FrontThermostat` (ESP32-S2) | GPIO8 | `v4.1.0` |
-| RearPassSide | `Plumbing` (ESP32-S2) | GPIO16 | `v3.1.0` |
+| KitchenDriverSide | `D1Mini_CabLock_KitchenDriverSide` | D4 (GPIO2) | `v3.1.0` |
+| KitchenUpperPassSide | `D1Mini_CabLock_KitchenUpperPassSide` | D4 (GPIO2) | `v3.1.0` |
+| RearDriverSide | `D1Mini_CabLock_RearDriverSide` | D4 (GPIO2) | `v3.1.0` |
+| KitchenPassSide | `FrontThermostat` (ESP32-S2) | GPIO8 | `v5.2.0` |
+| RearPassSide | `Plumbing` (ESP32-S2) | GPIO16 | `v3.5.0` |
 
 ---
 
@@ -40,12 +40,10 @@ Each board subscribes to its own `CabLock<ID>Command` plus the shared `CabLockAl
 |---|---|---|---|
 | `LOCK` | yes | yes | yes |
 | `UNLOCK` | yes | yes | yes |
-| `TOGGLE` | yes | yes | — |
-| `STATUS` | yes | yes | — |
+| `TOGGLE` | yes | yes | yes |
+| `STATUS` | yes | yes | yes |
 
-FrontThermostat implements only `LOCK` and `UNLOCK`; anything else is ignored. This matters
-if you script against `CabLockAllCommand` with `TOGGLE` — four locks would flip and the
-KitchenPassSide one would not.
+The D1 Mini nodes and FrontThermostat ignore a repeat of the same command within 1 s.
 
 Lock everything:
 
@@ -61,22 +59,28 @@ mosquitto_pub -h 192.168.8.1 -t CabLockAllCommand -m LOCK
 board also republishes its status on a 60 s heartbeat.
 
 `UNKNOWN` is the initial value of the state enum but is unreachable in practice — every
-board drives its servo to UNLOCKED during `setup()` and sets the state accordingly.
+board restores its saved state during `setup()` (see below).
 
 ---
 
-## No persistence — locks open on reboot
+## Lock state survives a reboot
 
-None of the D1 Mini lock nodes save state. `setup()` unconditionally drives the servo to
-`UNLOCKED_POSITION`, so **a power cut or a reflash unlocks the cabinet**.
+All five save their lock state and drive the servo back to it on boot, so a brownout while
+cranking the engine (or a reflash) does not unlock a cabinet:
 
-The Plumbing board is the exception: it persists `cabLock` to NVS and restores the locked
-position on boot.
+| Host | Stored in |
+|---|---|
+| D1 Mini nodes (v3.1.0+) | EEPROM emulation — 2 bytes, written only when the state changes |
+| Plumbing | NVS key `cabLock`, restored before WiFi starts (v3.4.0+) |
+| FrontThermostat | EEPROM struct v2, alongside heat mode and setpoint |
 
-FrontThermostat does not persist its lock state either — its EEPROM struct holds only the
-heat mode and setpoint.
+Before v3.1.0 the D1 Mini nodes attached and detached the servo in `setup()` with no delay,
+so it never actually moved — yet they reported `UNLOCKED`. The first boot on v3.1.0 has
+nothing saved and comes up `UNLOCKED`.
 
-This is worth knowing before flashing a lock node while the vehicle is moving.
+**Networking.** The D1 Mini nodes configure MQTT and OTA whether or not WiFi is up at
+boot, and retry the broker every 5 s without blocking. Before v3.1.0, a node that powered up
+before the router never reached MQTT until it was power-cycled.
 
 ---
 
@@ -92,22 +96,11 @@ devices.
 
 ---
 
-## Source differences between the three D1 Mini nodes
+## The three D1 Mini sketches
 
-The three sketches are near-identical. Only `CABINET_ID` and `otaHostname` are meant to
-differ, but two nodes have drifted:
-
-| | KitchenDriverSide | RearDriverSide | KitchenUpperPassSide |
-|---|---|---|---|
-| 1 s duplicate-command cooldown | yes | yes | **no** |
-| `ArduinoOTA.handle()` position in `loop()` | after WiFi check | **first** | after WiFi check |
-
-The missing cooldown on KitchenUpperPassSide means a repeated `LOCK` will re-drive the
-servo rather than being ignored. Harmless, but it is a real difference, not a
-documentation gap. Both other differences are cosmetic.
-
-If you are adding a fourth lock node, copy `D1Mini_CabLock_KitchenDriverSide` — it has the
-cooldown — and change `CABINET_ID`, `otaHostname`, and `upload_port`.
+Since v3.1.0 the three `src/main.cpp` files are identical apart from `CABINET_ID` and
+`otaHostname`. To add a fourth lock node, copy any of them and change those two lines plus
+`upload_port` in `platformio.ini`.
 
 ---
 
