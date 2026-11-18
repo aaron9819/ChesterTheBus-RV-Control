@@ -11,9 +11,15 @@
 #define CABINET_ID "RearDriverSide"  // Options: kitchen1, kitchen2, bathroom, bedroom, etc.
 #define FIRMWARE_VERSION "v3.1.0"
 
+// WiFi and OTA credentials come from secrets.ini at the repo root (gitignored),
+// passed in as build flags by platformio.ini. Template: secrets.example.ini.
+#if !defined(SECRET_WIFI_SSID) || !defined(SECRET_WIFI_PASSWORD) || !defined(SECRET_OTA_PASSWORD)
+#error "WiFi/OTA credentials missing - copy secrets.example.ini to secrets.ini at the repo root"
+#endif
+
 // WiFi Configuration
-const char* ssid = "Chester IOT";
-const char* password = "2025Chester9894";
+const char* ssid = SECRET_WIFI_SSID;
+const char* password = SECRET_WIFI_PASSWORD;
 
 // MQTT Configuration - Connect to Mosquitto broker on GL-AR300M16 router
 const char* mqtt_server = "192.168.8.1";  // Router IP address
@@ -23,7 +29,7 @@ const char* mqtt_password = "";  // No password
 
 // OTA Configuration
 const char* otaHostname = "CabLock-RearDriverSide";
-const char* otaPassword = "Chester2025";
+const char* otaPassword = SECRET_OTA_PASSWORD;
 
 // MQTT Client ID - Unique per device
 String mqtt_client_id = String("CabLock_") + String(CABINET_ID);

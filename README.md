@@ -101,11 +101,11 @@ mosquitto_sub -h 192.168.8.1 -t '#' -v
 |---|---|
 | SSID | `Chester IOT` |
 | MQTT broker | `192.168.8.1:1883`, anonymous |
-| OTA password | `Chester2025` |
+| WiFi / OTA passwords | `secrets.ini` (gitignored) |
 | Serial | 115200 baud |
 
-Credentials are hardcoded in each `src/main.cpp` — there is no `secrets.h`. Changing the
-network means editing all seven sketches.
+WiFi and OTA credentials are not in the code. They live in `secrets.ini` at the repo root (gitignored); copy `secrets.example.ini` to create it. Every `platformio.ini` loads it with `extra_configs` and passes the values in as `SECRET_*` build flags. Changing the
+network means editing that one file and reflashing every board.
 
 Static DHCP reservations on the router are recommended for every board. HX-Bypass is the
 only one that sets its own static IP in firmware (`192.168.8.140`).

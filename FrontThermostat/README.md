@@ -10,8 +10,8 @@ KitchenPassSide cabinet lock servo and drives a small OLED.
 
 Pins: **[../BOARD_ARCHITECTURE.md](../BOARD_ARCHITECTURE.md)** · Topics: **[../MQTT_TOPICS.md](../MQTT_TOPICS.md)**
 
-Requires Arduino-ESP32 core **3.x** (last built against 3.2.0). Credentials live in
-`include/secrets.h`, which is gitignored — copy `include/secrets.example.h` on a new machine.
+Requires Arduino-ESP32 core **3.x** (last built against 3.2.0). WiFi and OTA
+credentials come from `secrets.ini` at the repo root (gitignored; template `secrets.example.ini`).
 
 ---
 

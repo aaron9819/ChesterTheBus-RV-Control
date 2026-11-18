@@ -10,7 +10,12 @@
 #include <EEPROM.h>
 #include <stddef.h>
 #include <math.h>
-#include "secrets.h"   // include/secrets.h (gitignored) - see include/secrets.example.h
+
+// WiFi and OTA credentials come from secrets.ini at the repo root (gitignored),
+// passed in as build flags by platformio.ini. Template: secrets.example.ini.
+#if !defined(SECRET_WIFI_SSID) || !defined(SECRET_WIFI_PASSWORD) || !defined(SECRET_OTA_PASSWORD)
+#error "WiFi/OTA credentials missing - copy secrets.example.ini to secrets.ini at the repo root"
+#endif
 
 // ============================================
 // CONFIGURATION

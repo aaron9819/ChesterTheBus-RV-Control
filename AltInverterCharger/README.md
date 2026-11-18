@@ -105,7 +105,7 @@ All entities track availability via `AltInverterStatus` (LWT), so they show
 ## Flashing
 
 `platformio.ini` is currently set up for **OTA** upload to
-`AltInverterCharger.local` (password `Chester2025`, port 3232), so a plain
+`AltInverterCharger.local` (password from `secrets.ini`, port 3232), so a plain
 `pio run -t upload` goes over the air.
 
 A board that has never been flashed has no OTA listener, so its first upload

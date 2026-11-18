@@ -214,7 +214,7 @@ while tapping **RST** on the S2 Mini, then:
 pio run -t upload --upload-port /dev/cu.usbmodem101
 ```
 
-After that, OTA at `TempSensorBus.local:3232`, password `Chester2025`:
+After that, OTA at `TempSensorBus.local:3232`, password from `secrets.ini`:
 
 ```bash
 pio run -t upload

@@ -32,8 +32,14 @@
 // ============================================================================
 // WiFi & MQTT CONFIGURATION
 // ============================================================================
-const char* ssid = "Chester IOT";
-const char* password = "2025Chester9894";
+// WiFi and OTA credentials come from secrets.ini at the repo root (gitignored),
+// passed in as build flags by platformio.ini. Template: secrets.example.ini.
+#if !defined(SECRET_WIFI_SSID) || !defined(SECRET_WIFI_PASSWORD) || !defined(SECRET_OTA_PASSWORD)
+#error "WiFi/OTA credentials missing - copy secrets.example.ini to secrets.ini at the repo root"
+#endif
+
+const char* ssid = SECRET_WIFI_SSID;
+const char* password = SECRET_WIFI_PASSWORD;
 const char* mqtt_server = "192.168.8.1";
 const int mqtt_port = 1883;
 const char* mqtt_user = "";
@@ -42,7 +48,7 @@ const char* mqtt_client_id = "ESP32S2_Plumbing";
 
 // OTA Configuration
 const char* otaHostname = "Plumbing";
-const char* otaPassword = "Chester2025";
+const char* otaPassword = SECRET_OTA_PASSWORD;
 
 // ============================================================================
 // MQTT TOPICS

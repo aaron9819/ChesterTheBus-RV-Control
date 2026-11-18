@@ -1,7 +1,7 @@
 # Flashing and OTA Updates
 
 Every board in the system runs `ArduinoOTA` and can be updated over WiFi. All boards share
-the OTA password `Chester2025`.
+one OTA password, set in `secrets.ini` at the repo root (gitignored).
 
 ## OTA target table
 
@@ -102,9 +102,11 @@ Reserve a DHCP lease per board on the router and give it a recognisable name —
 both OTA and debugging far easier. HX-Bypass is the only board that sets its own static IP
 in firmware (`192.168.8.140`).
 
-**Authentication failed.** The password is `Chester2025` on every board, set both by
-`ArduinoOTA.setPassword()` in firmware and by `--auth=` in `platformio.ini`. They have to
-match; if you change one, change both.
+**Authentication failed.** `secrets.ini` has two OTA keys: `ota_password` is compiled into
+the firmware, and `ota_upload_password` is what `pio run -t upload` sends. The upload has to
+match the password the board is *currently* running. When rotating the password, set
+`ota_password` to the new one, flash every board while `ota_upload_password` still holds the
+old one, then change `ota_upload_password` to match.
 
 **Upload starts then stalls.** Usually WiFi signal. The ESP8266 boards in particular will
 drop mid-transfer on a weak link. Move closer to the router or fall back to USB.

@@ -91,3 +91,6 @@ __pycache__/
 # ============================================
 Mopeka\ Testing/.pio
 Mopeka\ Testing/.vscode/.cache
+
+# Shared firmware credentials (template: secrets.example.ini)
+secrets.ini

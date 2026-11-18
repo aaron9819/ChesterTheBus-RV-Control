@@ -110,7 +110,7 @@ Since v3.1.0 the three `src/main.cpp` files are identical apart from `CABINET_ID
 pio run -t upload
 ```
 
-All three are configured for OTA (`CabLock-<ID>.local`, port 8266, password `Chester2025`).
+All three are configured for OTA (`CabLock-<ID>.local`, port 8266, password from `secrets.ini`).
 Comment out the `upload_*` block in `platformio.ini` for USB.
 
 Static DHCP reservations on the router are strongly recommended — mDNS resolution of the

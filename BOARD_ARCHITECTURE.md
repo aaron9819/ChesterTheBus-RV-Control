@@ -34,13 +34,13 @@ Common to every board:
 | Setting | Value |
 |---|---|
 | WiFi SSID | `Chester IOT` |
-| WiFi password | `2025Chester9894` |
+| WiFi password | `secrets.ini` → `wifi_password` |
 | MQTT broker | `192.168.8.1:1883` |
 | MQTT auth | none (empty user/password) |
-| OTA password | `Chester2025` |
+| OTA password | `secrets.ini` → `ota_password` |
 | Serial monitor | 115200 baud |
 
-Credentials are hardcoded in each `src/main.cpp`. There is no `secrets.h` indirection.
+WiFi and OTA credentials are not in the code. They live in `secrets.ini` at the repo root (gitignored); copy `secrets.example.ini` to create it. Every `platformio.ini` loads it with `extra_configs` and passes the values in as `SECRET_*` build flags.
 
 ---
 

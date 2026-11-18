@@ -79,12 +79,14 @@ Keep that line in any new project.
 
 ## Configuration conventions
 
-**Credentials are mostly hardcoded.** FrontThermostat reads its SSID, WiFi password, and OTA
-password from `include/secrets.h` (gitignored; copy `include/secrets.example.h`). Every other
-`src/main.cpp` still carries them as string literals, and every `platformio.ini` has the OTA
-password in `upload_flags`. **This repository is public**, so those values are visible on
-GitHub — rotate them, then move each project to a gitignored `secrets.h` the way
-FrontThermostat does.
+**Credentials live in `secrets.ini`.** One gitignored file at the repo root holds the SSID,
+WiFi password, and OTA passwords for every project (template: `secrets.example.ini`). Each
+`platformio.ini` loads it with `extra_configs = ../secrets.ini`, compiles the values in as
+`SECRET_WIFI_SSID`, `SECRET_WIFI_PASSWORD` and `SECRET_OTA_PASSWORD`, and uses
+`ota_upload_password` for `--auth`. A missing file stops the build with an `#error`. **This
+repository is public** — never put a credential back into a tracked file. Passwords that
+were committed before 2026-11-17 are still in the git history, so they must never be reused.
+New projects: copy the `extra_configs` line and the three `SECRET_*` build flags.
 
 **Build flags.** Every `platformio.ini` defines `BUILD_TIMESTAMP`, `BUILD_DATE`, and
 `BUILD_TIME`. **No current firmware references them** — they are compiled in and unused.

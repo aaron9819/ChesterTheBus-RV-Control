@@ -135,7 +135,7 @@ pio run -t upload
 The OTA block in `platformio.ini` is **commented out**, so this uploads over USB by default.
 The running firmware does enable `ArduinoOTA` regardless — uncomment the
 `upload_protocol` / `upload_port` / `upload_flags` lines to push over the air to
-`HX-Bypass.local` (password `Chester2025`, port 8266), or target `192.168.8.140` directly
+`HX-Bypass.local` (password from `secrets.ini`, port 8266), or target `192.168.8.140` directly
 if mDNS is being unhelpful.
 
 Serial monitor is 115200 baud. The firmware logs each relay write along with a read-back of
