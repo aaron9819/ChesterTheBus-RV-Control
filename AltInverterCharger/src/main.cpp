@@ -4,12 +4,13 @@
 #include <EEPROM.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <stddef.h>
 
 // ============================================
 // CONFIGURATION
 // ============================================
 #define DEVICE_NAME "AltInverterCharger"
-#define FIRMWARE_VERSION "v1.1.0"
+#define FIRMWARE_VERSION "v1.1.1"
 
 // WiFi Configuration
 const char* ssid = "Chester IOT";
@@ -74,13 +75,13 @@ const unsigned long TEMP_SENSOR_RETRY_MS = 30000;    // Re-probe if sensor missi
 // EEPROM Configuration
 #define EEPROM_SIZE 64
 #define EEPROM_MAGIC 0xC4E1
-#define EEPROM_VERSION 1
+#define EEPROM_VERSION 2   // v2: checksum no longer covers itself or padding (v1 never verified)
 
 struct InverterConfig {
   uint16_t magic;
   uint8_t version;
   float voltageScale;
-  uint16_t checksum;
+  uint16_t checksum;   // covers every byte before this field
 };
 
 // ============================================
@@ -146,17 +147,20 @@ uint16_t calculateChecksum(InverterConfig* cfg);
 // ============================================
 // EEPROM CONFIG MANAGEMENT
 // ============================================
+// The old version summed sizeof(struct) - 2 bytes. With padding that range
+// included the checksum field itself (and an uninitialised pad byte), so a
+// saved config never verified on the next boot and the calibration was lost.
 uint16_t calculateChecksum(InverterConfig* cfg) {
   uint16_t sum = 0;
   uint8_t* ptr = (uint8_t*)cfg;
-  for (size_t i = 0; i < sizeof(InverterConfig) - sizeof(uint16_t); i++) {
+  for (size_t i = 0; i < offsetof(InverterConfig, checksum); i++) {
     sum += ptr[i];
   }
   return sum;
 }
 
 void saveConfigToEEPROM() {
-  InverterConfig cfg;
+  InverterConfig cfg = {};   // zeroed: padding bytes are deterministic
   cfg.magic = EEPROM_MAGIC;
   cfg.version = EEPROM_VERSION;
   cfg.voltageScale = voltageScale;
