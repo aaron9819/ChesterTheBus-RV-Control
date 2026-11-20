@@ -1,7 +1,82 @@
 # Flashing and OTA Updates
 
-Every board in the system runs `ArduinoOTA` and can be updated over WiFi. All boards share
-one OTA password, set in `secrets.ini` at the repo root (gitignored).
+Every ESP board can be updated three ways:
+
+1. **From a phone, tablet, or any browser** — the board's own update page. No software needed.
+2. **From a computer with PlatformIO** — `pio run -t upload` over WiFi (ArduinoOTA).
+3. **Over USB** — needed only for a blank board.
+
+All of them use the board's **device password**. It starts as `ota_password` from
+`secrets.ini` and can be changed on the board's settings page. The GIGA R1 boards are not
+covered by any of this and still update over USB only.
+
+## Updating from a phone or tablet
+
+1. Download the board's file from the repo's
+   [Releases page](https://github.com/aaron9819/ChesterTheBus-RV-Control/releases/latest).
+   Each file is named after the board, for example `Plumbing-v3.6.0.bin`.
+2. On the bus WiFi, open `http://<hostname>.local/` (hostnames in the table below), or
+   the board's IP address if `.local` names do not resolve on your device. Some Android
+   phones need the IP.
+3. Log in with user **`admin`** and the device password.
+4. Tap **Update firmware**, choose the `.bin` file, and tap **Upload and install**. The
+   upload takes 10–60 s, then the board restarts on the new firmware.
+
+The page refuses a file whose name does not contain the board's hostname, which stops the
+thermostat's firmware from going onto a cabinet lock. If you renamed the file on purpose,
+tick the box and try again. Stored settings (WiFi, MQTT, password) and each board's own
+state are kept across an update.
+
+## Settings page and changing networks
+
+The same page (`http://<hostname>.local/`) shows the WiFi connection, IP, MQTT broker and
+firmware version. It also lets you change:
+
+- the WiFi network name and password
+- the MQTT broker address and port
+- the device password
+- a static IP and gateway (HX-Bypass only; leave the IP blank for DHCP)
+
+Blank password fields keep the current value. Saving restarts the board.
+
+**Setup hotspot.** If a board cannot reach its WiFi for 30 seconds (new router, changed
+password), it opens its own hotspot named **`<hostname>-Setup`**, for example
+`Plumbing-Setup`. The hotspot password is the device password. Join it from a phone and
+the settings page opens on its own; if it doesn't, browse to `http://192.168.4.1/`. Enter
+the new WiFi details and save. The board keeps controlling its hardware the whole time, and
+the hotspot closes as soon as it is back on WiFi.
+
+While the hotspot is up, the boards' "network gone too long, restart" timers are paused. If
+nobody joins it for 15 minutes the board restarts once and tries again.
+
+**Reset network settings** (on the settings page) puts back the settings built into the
+firmware. A Releases download has none built in, so on those the board goes straight to
+its setup hotspot.
+
+**Where the settings live.** ESP32 boards keep them in NVS (namespace `chesternet`). ESP8266
+boards keep them in the top half of the EEPROM sector (bytes 256–511). The code is in
+`lib_shared/ChesterNet`. On first boot a board stores the defaults from `secrets.ini`.
+After that the stored values win, with one exception: a board whose settings were never
+edited on the web page follows `secrets.ini` again if the defaults built into its
+firmware change.
+
+## Publishing release firmware
+
+```bash
+tools/build-release.sh
+```
+
+This builds every ESP board with `-D CHESTER_RELEASE_BUILD`, so no WiFi or device
+password is compiled in. It writes `release/firmware/<hostname>-<version>.bin` plus
+`SHA256SUMS.txt`, and refuses to finish if any value from `secrets.ini` turns up inside a
+binary. Upload the folder's contents as a GitHub release:
+
+```bash
+gh release create firmware-YYYY-MM-DD release/firmware/* --title "Firmware YYYY-MM-DD" --notes "..."
+```
+
+Bump a board's `FIRMWARE_VERSION` before publishing a changed build, so the file name and
+the settings page both show which version is installed.
 
 ## OTA target table
 
@@ -68,7 +143,11 @@ confirm a flash took.
   update starts, so an update landing mid-pulse cannot leave the inverter's power button
   held down. `loop()` returns early while `otaInProgress` is set.
 - **Cabinet locks** — detach the servo if attached, so it is not driven during the update.
-- **FrontThermostat, HX-Bypass** — no special handling; they simply serve the update.
+- **FrontThermostat** — shows `UPDATING` on the OLED and saves pending state before restarting.
+- **HX-Bypass** — no special handling; it simply serves the update.
+
+A browser upload runs the same handling through `ChesterNet::onUpdateStart()` /
+`onUpdateEnd()`. It blocks `loop()` until the upload finishes, just like ArduinoOTA does.
 
 ## Relay and valve state across a reflash
 
@@ -84,10 +163,10 @@ Everything else comes up in a defined default state:
 | FrontThermostat | Mode and setpoint restored from EEPROM; fan off, engine loop assumed closed |
 | AltInverterCharger | Voltage calibration restored from EEPROM; relay open |
 | HX-Bypass | **Nothing persisted** — auto mode on, 160 °F setpoint, valve closed |
-| Cabinet locks | **Nothing persisted** — servo driven to UNLOCKED at boot |
+| Cabinet locks | Lock state restored from EEPROM; servo driven back to it at boot |
 
-Reflashing a cabinet lock therefore unlocks it. Reflashing HX-Bypass discards a custom
-setpoint. Both are worth knowing before an update while the vehicle is in use.
+Reflashing HX-Bypass discards a custom setpoint, which is worth knowing before an update
+while the vehicle is in use. Network settings are kept on every board.
 
 ## Troubleshooting
 
@@ -100,7 +179,7 @@ pio run -t upload --upload-port 192.168.8.140
 
 Reserve a DHCP lease per board on the router and give it a recognisable name — that makes
 both OTA and debugging far easier. HX-Bypass is the only board that sets its own static IP
-in firmware (`192.168.8.140`).
+(default `192.168.8.140`, editable or clearable for DHCP on its settings page).
 
 **Authentication failed.** `secrets.ini` has two OTA keys: `ota_password` is compiled into
 the firmware, and `ota_upload_password` is what `pio run -t upload` sends. The upload has to
@@ -112,5 +191,13 @@ old one, then change `ota_upload_password` to match.
 drop mid-transfer on a weak link. Move closer to the router or fall back to USB.
 
 **Board is unreachable and unresponsive.** The Plumbing board self-restarts after 8
-consecutive network failures and FrontThermostat/AltInverterCharger restart after 120 s
-without WiFi or MQTT, so give an apparently dead board two minutes before pulling it.
+consecutive network failures, AltInverterCharger/TempSensorBus after 120 s and
+FrontThermostat after 15 min without WiFi or MQTT, so give an apparently dead board two
+minutes before pulling it. If its WiFi is gone, look for its `<hostname>-Setup` hotspot
+instead.
+
+**Forgot the device password.** Only a USB reflash recovers it, because stored settings
+survive an ordinary upload. Connect the board over USB and run `pio run -t erase`, then
+`pio run -t upload` with the USB upload settings. The board comes back with the
+`secrets.ini` defaults. Erasing also clears the board's own saved state (relay states,
+calibration, lock position).

@@ -10,6 +10,7 @@
 #include <Preferences.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
+#include <ChesterNet.h>
 
 // ============================================================================
 // ESP32-S2 MINI PLUMBING & ENVIRONMENT CONTROLLER - Chester the Bus RV
@@ -26,29 +27,27 @@
 // - All relay status publishing (authoritative source for valve states)
 // ============================================================================
 
-#define FIRMWARE_VERSION "v3.5.0"
+#define FIRMWARE_VERSION "v3.6.0"
 #define CABINET_ID "RearPassSide"
 
 // ============================================================================
 // WiFi & MQTT CONFIGURATION
 // ============================================================================
-// WiFi and OTA credentials come from secrets.ini at the repo root (gitignored),
-// passed in as build flags by platformio.ini. Template: secrets.example.ini.
-#if !defined(SECRET_WIFI_SSID) || !defined(SECRET_WIFI_PASSWORD) || !defined(SECRET_OTA_PASSWORD)
-#error "WiFi/OTA credentials missing - copy secrets.example.ini to secrets.ini at the repo root"
-#endif
-
-const char* ssid = SECRET_WIFI_SSID;
-const char* password = SECRET_WIFI_PASSWORD;
-const char* mqtt_server = "192.168.8.1";
-const int mqtt_port = 1883;
+// WiFi, MQTT broker and the device (OTA) password are stored on the board by
+// ChesterNet (lib_shared/ChesterNet) and editable at http://Plumbing.local/.
+// secrets.ini at the repo root only supplies the defaults a board starts with.
+// These are filled in from ChesterNet at the top of setup().
+const char* ssid = nullptr;
+const char* password = nullptr;
+const char* mqtt_server = nullptr;
+int mqtt_port = 1883;
 const char* mqtt_user = "";
 const char* mqtt_password = "";
 const char* mqtt_client_id = "ESP32S2_Plumbing";
 
 // OTA Configuration
 const char* otaHostname = "Plumbing";
-const char* otaPassword = SECRET_OTA_PASSWORD;
+const char* otaPassword = nullptr;
 
 // ============================================================================
 // MQTT TOPICS
@@ -157,7 +156,7 @@ const char* Topic_Firmware_Version = "PlumbingFirmwareVersion";
 // HARDWARE PIN DEFINITIONS - ESP32-S2 Mini
 // ============================================================================
 // DS18B20 Temperature Sensors (All on shared OneWire bus)
-#define TEMP_SENSOR_PIN 13           // GPIO13 - Shared OneWire bus, 4.7k pullup to 3.3V
+#define TEMP_SENSOR_PIN 14           // GPIO14 - Shared OneWire bus, 4.7k pullup to 3.3V
 // Five probes share this bus. Each harness position is bound to a sensor's 64-bit
 // ROM address (stored in NVS), never to its discovery index - see the harness
 // section below for why.
@@ -334,7 +333,7 @@ float environmentPressure = -999.0;
 // ============================================================================
 // DS18B20 HARNESS - ADDRESS-BASED ROLE ASSIGNMENT
 // ============================================================================
-// Five probes share the GPIO13 OneWire bus. Each harness position is bound to a
+// Five probes share the GPIO14 OneWire bus. Each harness position is bound to a
 // sensor's 64-bit ROM address, held in NVS - never to its discovery index.
 // Index order IS ROM-address order, so it shifts whenever a probe is added,
 // replaced, or drops off the bus, silently swapping readings between positions.
@@ -600,6 +599,26 @@ void setup() {
   preferences.begin("plumbing", false);
   loadConfigFromPreferences();
 
+  // Stored network settings (defaults from secrets.ini on first boot)
+  ChesterNet::begin(otaHostname, FIRMWARE_VERSION);
+  ssid = ChesterNet::wifiSsid();
+  password = ChesterNet::wifiPassword();
+  mqtt_server = ChesterNet::mqttHost();
+  mqtt_port = ChesterNet::mqttPort();
+  otaPassword = ChesterNet::devicePassword();
+  // A browser upload blocks loop() for up to a minute: take this task off the
+  // watchdog for it, exactly as ArduinoOTA's onStart does. Relays hold state.
+  ChesterNet::onUpdateStart([]() {
+    otaInProgress = true;
+    esp_task_wdt_delete(NULL);
+  });
+  ChesterNet::onUpdateEnd([](bool ok) {
+    if (!ok) {
+      esp_task_wdt_add(NULL);
+      otaInProgress = false;
+    }
+  });
+
   // Configure relay pins as outputs (Active LOW)
   pinMode(FRESH_WATER_HEATER_PIN, OUTPUT);
   pinMode(GREY_WATER_HEATER_PIN, OUTPUT);
@@ -655,8 +674,8 @@ void setup() {
     Serial.println("⚠ BME280 sensor NOT found");
   }
 
-  // Initialize DS18B20 temperature sensors (shared OneWire bus on pin 13)
-  Serial.println("Initializing DS18B20 harness (GPIO13)...");
+  // Initialize DS18B20 temperature sensors (shared OneWire bus on GPIO14; moved off GPIO13 in v3.5.1)
+  Serial.printf("Initializing DS18B20 harness (GPIO%d)...\n", TEMP_SENSOR_PIN);
 
   tempSensors.begin();
   // Conversions run non-blocking. Left at the default, requestTemperatures()
@@ -708,6 +727,9 @@ void setup() {
 void loop() {
   ArduinoOTA.handle();
 
+  // Settings web page, browser firmware updates, setup hotspot
+  ChesterNet::loop();
+
   // Feed task watchdog to indicate loop is healthy
   esp_task_wdt_reset();
 
@@ -717,9 +739,11 @@ void loop() {
   if (currentMillis - lastWifiCheck >= 10000) { // check every 10s
     lastWifiCheck = currentMillis;
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("WiFi down - attempting quick reconnect...");
       otaListenerUp = false;   // the mDNS responder died with the connection
-      ensureWifiConnected(3000); // short timeout
+      if (ChesterNet::wifiRetryAllowed()) {
+        Serial.println("WiFi down - attempting quick reconnect...");
+        ensureWifiConnected(3000); // short timeout
+      }
     }
 
     // Re-arm OTA + mDNS after any reconnect. Without this the board stays
@@ -829,6 +853,8 @@ void setupWifi() {
 // the interface or device after repeated failures.
 bool ensureWifiConnected(unsigned long timeoutMs = 5000) {
   if (WiFi.status() == WL_CONNECTED) return true;
+  // Someone is on the setup hotspot: reconnect attempts would knock them off
+  if (!ChesterNet::wifiRetryAllowed()) return false;
 
   unsigned long start = millis();
   unsigned long attemptDelay = 250; // start small
@@ -1173,7 +1199,8 @@ void reconnectMQTT() {
     Serial.println("MQTT reconnect skipped - WiFi down");
     mqttFailCount++;
     // If WiFi/MQTT failing repeatedly, consider resetting
-    if (mqttFailCount >= 8) {
+    // Not while the setup hotspot is up - it is how a new network gets entered
+    if (mqttFailCount >= 8 && !ChesterNet::portalActive()) {
       Serial.println("Repeated network failures - restarting device");
       delay(200);
       ESP.restart();
@@ -2371,7 +2398,7 @@ void printTempBusReport() {
   Serial.printf("\n--- DS18B20 harness --- GPIO%d  found=%d  parasite=%s\n", TEMP_SENSOR_PIN,
                 tempBusCount, tempSensors.isParasitePowerMode() ? "YES" : "no");
   if (tempBusCount == 0) {
-    Serial.println("  NO DEVICES. Check 4.7k pullup to 3.3V, data on GPIO13, common ground.");
+    Serial.println("  NO DEVICES. Check 4.7k pullup to 3.3V, data on the bus GPIO, common ground.");
   }
   Serial.println("  #  ROM Address        Position          Temp F   Reads  Errors  Last error");
   for (int i = 0; i < tempBusCount; i++) {

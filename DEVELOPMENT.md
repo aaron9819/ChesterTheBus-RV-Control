@@ -86,7 +86,25 @@ WiFi password, and OTA passwords for every project (template: `secrets.example.i
 `ota_upload_password` for `--auth`. A missing file stops the build with an `#error`. **This
 repository is public** — never put a credential back into a tracked file. Passwords that
 were committed before 2026-11-17 are still in the git history, so they must never be reused.
-New projects: copy the `extra_configs` line and the three `SECRET_*` build flags.
+
+**Network settings go through ChesterNet** (`lib_shared/ChesterNet`). Board code never uses
+`SECRET_*` directly. `ChesterNet::begin(hostname, FIRMWARE_VERSION)` at the top of `setup()`
+loads the stored settings (seeded from the `SECRET_*` defaults on first boot), and the
+board reads `wifiSsid()`, `wifiPassword()`, `mqttHost()`, `mqttPort()` and
+`devicePassword()` from it. `ChesterNet::loop()` runs every pass and serves the settings /
+update page and the setup hotspot. Two rules for a board's own network code:
+
+- Only call `WiFi.begin()` when `ChesterNet::wifiRetryAllowed()`. It is false while a phone
+  is on the setup hotspot.
+- Skip any "network gone, restart" path while `ChesterNet::portalActive()`.
+
+Use `ChesterNet::onUpdateStart()` to make outputs safe, because a browser upload blocks
+`loop()`. On ESP8266, every `EEPROM.begin()` must use `CHESTERNET_EEPROM_SIZE`, and the
+board's own data must stay below byte 256. Keeping board code off `SECRET_*` is also what
+makes `tools/build-release.sh` produce credential-free binaries.
+
+New projects: copy the `extra_configs` line, the three `SECRET_*` build flags, and
+`lib_extra_dirs = ../lib_shared`, then follow any existing board's `setup()`/`loop()`.
 
 **Build flags.** Every `platformio.ini` defines `BUILD_TIMESTAMP`, `BUILD_DATE`, and
 `BUILD_TIME`. **No current firmware references them** — they are compiled in and unused.
@@ -98,11 +116,12 @@ discovery payload.
 
 | Project | Version |
 |---|---|
-| FrontThermostat | `v4.1.0` |
-| Plumbing | `v3.1.0` |
-| Cabinet locks (×3) | `v3.0.0` |
-| AltInverterCharger | `v1.1.0` |
-| HX-Bypass | `v1.0.0` |
+| FrontThermostat | `v5.3.0` |
+| Plumbing | `v3.6.0` |
+| Cabinet locks (×3) | `v3.2.0` |
+| AltInverterCharger | `v1.2.0` |
+| TempSensorBus | `v1.2.0` |
+| HX-Bypass | `v1.1.0` |
 
 ## Firmware conventions
 

@@ -8,34 +8,34 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <EEPROM.h>
+#include <ChesterNet.h>
 #include <stddef.h>
 #include <math.h>
 
-// WiFi and OTA credentials come from secrets.ini at the repo root (gitignored),
-// passed in as build flags by platformio.ini. Template: secrets.example.ini.
-#if !defined(SECRET_WIFI_SSID) || !defined(SECRET_WIFI_PASSWORD) || !defined(SECRET_OTA_PASSWORD)
-#error "WiFi/OTA credentials missing - copy secrets.example.ini to secrets.ini at the repo root"
-#endif
+// WiFi, MQTT broker and the device (OTA) password are stored on the board by
+// ChesterNet (lib_shared/ChesterNet) and editable at
+// http://Thermostat-KitchenPassSide.local/. secrets.ini at the repo root only
+// supplies the defaults a board starts with.
 
 // ============================================
 // CONFIGURATION
 // ============================================
 #define CABINET_ID "KitchenPassSide"
-#define FIRMWARE_VERSION "v5.2.0"
+#define FIRMWARE_VERSION "v5.3.0"
 
-// WiFi Configuration
-const char* ssid = SECRET_WIFI_SSID;
-const char* password = SECRET_WIFI_PASSWORD;
+// WiFi Configuration - filled in from ChesterNet at the top of setup()'s WiFi section
+const char* ssid = nullptr;
+const char* password = nullptr;
 
 // MQTT Configuration
-const char* mqtt_server = "192.168.8.1";
-const int mqtt_port = 1883;
+const char* mqtt_server = nullptr;
+int mqtt_port = 1883;
 const char* mqtt_user = "";
 const char* mqtt_password = "";
 
 // OTA Configuration
 const char* otaHostname = "Thermostat-" CABINET_ID;
-const char* otaPassword = SECRET_OTA_PASSWORD;
+const char* otaPassword = nullptr;
 
 String mqtt_client_id = String("Thermostat_") + String(CABINET_ID);
 
@@ -1454,13 +1454,14 @@ void handleWifi(unsigned long now) {
   }
   // The core reconnects on its own; only restart the attempt occasionally,
   // never while an association/DHCP may still be in progress.
-  if (now - lastWifiKick >= WIFI_KICK_MS) {
+  if (now - lastWifiKick >= WIFI_KICK_MS && ChesterNet::wifiRetryAllowed()) {
     lastWifiKick = now;
     Serial.println("WiFi still down - restarting connection attempt");
     WiFi.disconnect();
     WiFi.begin(ssid, password);
   }
-  if (now - wifiDownSince >= WIFI_RESTART_MS) {
+  // Not while the setup hotspot is up - it is how a new network gets entered
+  if (now - wifiDownSince >= WIFI_RESTART_MS && !ChesterNet::portalActive()) {
     Serial.println("WiFi down too long - restarting");
     if (stateDirty) saveStateNow();
     ESP.restart();
@@ -1489,7 +1490,7 @@ void handleMqtt(unsigned long now) {
   if (reconnectMQTT()) {
     mqttDown = false;
     displayForce = true;
-  } else if (now - mqttDownSince >= MQTT_RESTART_MS) {
+  } else if (now - mqttDownSince >= MQTT_RESTART_MS && !ChesterNet::portalActive()) {
     Serial.println("MQTT unreachable too long - restarting");
     if (stateDirty) saveStateNow();
     ESP.restart();
@@ -1544,6 +1545,31 @@ void setup() {
   if (currentState == STATE_UNKNOWN) currentState = STATE_UNLOCKED;   // no saved state: default unlocked
   moveServo(currentState == STATE_LOCKED ? LOCKED_POSITION : UNLOCKED_POSITION);
   Serial.printf("Servo restored to %s\n", currentState == STATE_LOCKED ? "LOCKED" : "UNLOCKED");
+
+  // Stored network settings (defaults from secrets.ini on first boot)
+  ChesterNet::begin(otaHostname, FIRMWARE_VERSION);
+  ssid = ChesterNet::wifiSsid();
+  password = ChesterNet::wifiPassword();
+  mqtt_server = ChesterNet::mqttHost();
+  mqtt_port = ChesterNet::mqttPort();
+  otaPassword = ChesterNet::devicePassword();
+  ChesterNet::onUpdateStart([]() {
+    otaInProgress = true;
+    noteInteraction();
+    if (displayOff) { display.ssd1306_command(SSD1306_DISPLAYON); displayOff = false; }
+    showMessage("UPDATING", "WEB", 600000);
+    renderDisplay(true);
+  });
+  ChesterNet::onUpdateEnd([](bool ok) {
+    if (ok) {
+      if (stateDirty) saveStateNow();
+      showMessage("UPDATE", "DONE", 5000);
+    } else {
+      otaInProgress = false;
+      showMessage("UPDATE", "FAIL", 5000);
+    }
+    renderDisplay(true);
+  });
 
   // WiFi: non-blocking; loop() keeps the thermostat running while it connects.
   WiFi.mode(WIFI_STA);
@@ -1601,6 +1627,9 @@ void setup() {
 // MAIN LOOP
 // ============================================
 void loop() {
+  // Settings web page, browser firmware updates, setup hotspot
+  ChesterNet::loop();
+
   unsigned long now = millis();
 
   handleWifi(now);

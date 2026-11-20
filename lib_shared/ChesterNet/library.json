@@ -1,0 +1,7 @@
+{
+  "name": "ChesterNet",
+  "version": "1.0.0",
+  "description": "Shared network setup for every Chester board: stored WiFi/MQTT settings, a setup hotspot when WiFi is lost, and a browser firmware-update page.",
+  "frameworks": "arduino",
+  "platforms": ["espressif32", "espressif8266"]
+}

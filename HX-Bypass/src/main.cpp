@@ -1,32 +1,35 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoOTA.h>
+#include <ChesterNet.h>
 
 // ============================================
 // CONFIGURATION
 // ============================================
 #define DEVICE_ID "HX-Bypass"
-#define FIRMWARE_VERSION "v1.0.1"
+#define FIRMWARE_VERSION "v1.1.0"
 
-// WiFi and OTA credentials come from secrets.ini at the repo root (gitignored),
-// passed in as build flags by platformio.ini. Template: secrets.example.ini.
-#if !defined(SECRET_WIFI_SSID) || !defined(SECRET_WIFI_PASSWORD) || !defined(SECRET_OTA_PASSWORD)
-#error "WiFi/OTA credentials missing - copy secrets.example.ini to secrets.ini at the repo root"
-#endif
+// WiFi, MQTT broker, static IP and the device (OTA) password are stored on the
+// board by ChesterNet (lib_shared/ChesterNet) and editable at
+// http://HX-Bypass.local/. secrets.ini only supplies the defaults a board starts
+// with. These are filled in from ChesterNet at the top of setup().
+const char* ssid = nullptr;
+const char* password = nullptr;
 
-// WiFi Configuration
-const char* ssid = SECRET_WIFI_SSID;
-const char* password = SECRET_WIFI_PASSWORD;
+// MQTT Configuration
+const char* mqtt_server = nullptr;
+int mqtt_port = 1883;
 
-// MQTT Configuration - Connect to Mosquitto broker on GL-AR300M16 router
-const char* mqtt_server = "192.168.8.1";  // Router IP address
-const int mqtt_port = 1883;
+// Default fixed address. Editable (or cleared for DHCP) on the settings page.
+#define DEFAULT_STATIC_IP "192.168.8.140"
+#define DEFAULT_GATEWAY   "192.168.8.1"
+const unsigned long WIFI_KICK_MS = 30000;   // Restart the WiFi attempt this often while down
 const char* mqtt_user = "";  // No username
 const char* mqtt_password = "";  // No password
 
 // OTA Configuration
 const char* otaHostname = "HX-Bypass";
-const char* otaPassword = SECRET_OTA_PASSWORD;
+const char* otaPassword = nullptr;
 
 // MQTT Client ID - Unique per device
 String mqtt_client_id = String("HX_Bypass");
@@ -389,16 +392,16 @@ void setup() {
   digitalWrite(RELAY_PIN, HIGH);  // Start with valve closed (relay inactive = HIGH)
   Serial.println("Relay initialized to OFF (valve closed)");
 
-  // Configure static IP address
-  IPAddress staticIP(192, 168, 8, 140);  // Static IP: 192.168.8.140
-  IPAddress gateway(192, 168, 8, 1);     // Gateway (router): 192.168.8.1
-  IPAddress subnet(255, 255, 255, 0);    // Subnet mask
-  IPAddress dns(8, 8, 8, 8);             // DNS (Google)
+  // Stored network settings (defaults from secrets.ini on first boot)
+  ChesterNet::begin(otaHostname, FIRMWARE_VERSION, DEFAULT_STATIC_IP, DEFAULT_GATEWAY);
+  ssid = ChesterNet::wifiSsid();
+  password = ChesterNet::wifiPassword();
+  mqtt_server = ChesterNet::mqttHost();
+  mqtt_port = ChesterNet::mqttPort();
+  otaPassword = ChesterNet::devicePassword();
 
-  // Apply static IP configuration
-  WiFi.config(staticIP, gateway, subnet, dns);
-  Serial.print("Static IP configured: ");
-  Serial.println(staticIP);
+  // Static IP from the stored settings (blank there = DHCP)
+  ChesterNet::applyStaticIp();
 
   // MQTT is configured whether or not WiFi is up yet. It used to be set up only
   // when WiFi connected within 20 s of boot; otherwise the loop retried forever
@@ -440,30 +443,28 @@ void setup() {
 }
 
 void loop() {
-  // Ensure WiFi is connected
+  // Settings web page, browser firmware updates, setup hotspot
+  ChesterNet::loop();
+
+  // WiFi: restart the attempt every WIFI_KICK_MS while down. This used to block
+  // for 10 s on every pass, which would also have frozen the settings page.
+  static unsigned long lastWifiKick = 0;
+  static bool wifiWasConnected = false;
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected, reconnecting...");
-
-    // Reconfigure static IP before reconnecting
-    IPAddress staticIP(192, 168, 8, 140);
-    IPAddress gateway(192, 168, 8, 1);
-    IPAddress subnet(255, 255, 255, 0);
-    IPAddress dns(8, 8, 8, 8);
-
-    WiFi.config(staticIP, gateway, subnet, dns);
-    Serial.print("Static IP reconfigured: ");
-    Serial.println(staticIP);
-
-    WiFi.begin(ssid, password);
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-      delay(500);
-      Serial.print(".");
-      attempts++;
+    if (wifiWasConnected) {
+      wifiWasConnected = false;
+      Serial.println("WiFi disconnected");
     }
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nWiFi reconnected!");
+    if (millis() - lastWifiKick >= WIFI_KICK_MS && ChesterNet::wifiRetryAllowed()) {
+      lastWifiKick = millis();
+      Serial.println("WiFi down - restarting connection attempt");
+      ChesterNet::applyStaticIp();
+      WiFi.begin(ssid, password);
     }
+  } else if (!wifiWasConnected) {
+    wifiWasConnected = true;
+    Serial.print("WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
   }
 
   // OTA starts the first time WiFi is up, even if that is long after boot

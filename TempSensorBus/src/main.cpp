@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoOTA.h>
+#include <ChesterNet.h>
 #include <Preferences.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -10,28 +11,26 @@
 // CONFIGURATION
 // ============================================
 #define DEVICE_NAME "TempSensorBus"
-#define FIRMWARE_VERSION "v1.1.1"
+#define FIRMWARE_VERSION "v1.2.0"
 
-// WiFi and OTA credentials come from secrets.ini at the repo root (gitignored),
-// passed in as build flags by platformio.ini. Template: secrets.example.ini.
-#if !defined(SECRET_WIFI_SSID) || !defined(SECRET_WIFI_PASSWORD) || !defined(SECRET_OTA_PASSWORD)
-#error "WiFi/OTA credentials missing - copy secrets.example.ini to secrets.ini at the repo root"
-#endif
-
-// WiFi Configuration
-const char* ssid = SECRET_WIFI_SSID;
-const char* password = SECRET_WIFI_PASSWORD;
+// WiFi, MQTT broker and the device (OTA) password are stored on the board by
+// ChesterNet (lib_shared/ChesterNet) and editable at http://<hostname>.local/.
+// secrets.ini at the repo root only supplies the defaults a board starts with.
+// These are filled in from ChesterNet early in setup().
+const char* ssid = nullptr;
+const char* password = nullptr;
 
 // MQTT Configuration
-const char* mqtt_server = "192.168.8.1";
-const int mqtt_port = 1883;
+const char* mqtt_server = nullptr;
+int mqtt_port = 1883;
+const unsigned long WIFI_KICK_MS = 10000;   // WiFi reconnect attempt interval while down
 const char* mqtt_user = "";
 const char* mqtt_password = "";
 const char* mqtt_client_id = "TempSensorBus";
 
 // OTA Configuration
 const char* otaHostname = DEVICE_NAME;
-const char* otaPassword = SECRET_OTA_PASSWORD;
+const char* otaPassword = nullptr;
 
 // Hardware Configuration
 // GPIO13 matches the Plumbing board's OneWire bus so harness wiring is identical.
@@ -1184,6 +1183,19 @@ void setup() {
   rescanBus();
   printBusReport();
 
+  // Stored network settings (defaults from secrets.ini on first boot)
+  ChesterNet::begin(otaHostname, FIRMWARE_VERSION);
+  ssid = ChesterNet::wifiSsid();
+  password = ChesterNet::wifiPassword();
+  mqtt_server = ChesterNet::mqttHost();
+  mqtt_port = ChesterNet::mqttPort();
+  otaPassword = ChesterNet::devicePassword();
+  ChesterNet::onUpdateStart([]() {
+    otaInProgress = true;
+    conversionPending = false;
+  });
+  ChesterNet::onUpdateEnd([](bool ok) { if (!ok) otaInProgress = false; });
+
   Serial.print("Connecting to WiFi");
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
@@ -1244,17 +1256,25 @@ void setup() {
 // MAIN LOOP
 // ============================================
 void loop() {
-  // WiFi reconnection
+  // Settings web page, browser firmware updates, setup hotspot
+  ChesterNet::loop();
+
+  // WiFi reconnection. One attempt every WIFI_KICK_MS - restarting it on every
+  // pass never gave an association time to finish.
   if (WiFi.status() != WL_CONNECTED) {
+    static unsigned long lastWifiKick = 0;
     if (wifiLostSince == 0) wifiLostSince = millis();
 
-    Serial.println("WiFi disconnected, reconnecting...");
-    WiFi.begin(ssid, password);
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 6) {
-      delay(250);
-      Serial.print(".");
-      attempts++;
+    if (ChesterNet::wifiRetryAllowed() && (lastWifiKick == 0 || millis() - lastWifiKick >= WIFI_KICK_MS)) {
+      lastWifiKick = millis();
+      Serial.println("WiFi disconnected, reconnecting...");
+      WiFi.begin(ssid, password);
+      int attempts = 0;
+      while (WiFi.status() != WL_CONNECTED && attempts < 6) {
+        delay(250);
+        Serial.print(".");
+        attempts++;
+      }
     }
 
     if (WiFi.status() == WL_CONNECTED) {
@@ -1264,7 +1284,8 @@ void loop() {
         ArduinoOTA.begin();
         otaInitialized = true;
       }
-    } else if (millis() - wifiLostSince > WIFI_RECOVERY_TIMEOUT) {
+    } else if (millis() - wifiLostSince > WIFI_RECOVERY_TIMEOUT && !ChesterNet::portalActive()) {
+      // Not while the setup hotspot is up - it is how a new network gets entered
       Serial.println("\nWiFi timeout - restarting...");
       ESP.restart();
     }
@@ -1280,7 +1301,7 @@ void loop() {
       Serial.println("MQTT reconnecting...");
       if (reconnectMQTT()) {
         mqttLostSince = 0;
-      } else if (millis() - mqttLostSince > MQTT_RECOVERY_TIMEOUT) {
+      } else if (millis() - mqttLostSince > MQTT_RECOVERY_TIMEOUT && !ChesterNet::portalActive()) {
         Serial.println("MQTT timeout - restarting...");
         ESP.restart();
       }

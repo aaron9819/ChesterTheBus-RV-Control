@@ -3,33 +3,31 @@
 #include <Servo.h>
 #include <ArduinoOTA.h>
 #include <EEPROM.h>
+#include <ChesterNet.h>
 
 // ============================================
 // CONFIGURATION - Change for each D1 Mini
 // ============================================
 // Set unique cabinet identifier for each D1 Mini
 #define CABINET_ID "KitchenUpperPassSide"  // Options: kitchen1, kitchen2, bathroom, bedroom, etc.
-#define FIRMWARE_VERSION "v3.1.0"
+#define FIRMWARE_VERSION "v3.2.0"
 
-// WiFi and OTA credentials come from secrets.ini at the repo root (gitignored),
-// passed in as build flags by platformio.ini. Template: secrets.example.ini.
-#if !defined(SECRET_WIFI_SSID) || !defined(SECRET_WIFI_PASSWORD) || !defined(SECRET_OTA_PASSWORD)
-#error "WiFi/OTA credentials missing - copy secrets.example.ini to secrets.ini at the repo root"
-#endif
+// WiFi, MQTT broker and the device (OTA) password are stored on the board by
+// ChesterNet (lib_shared/ChesterNet) and editable at http://<hostname>.local/.
+// secrets.ini at the repo root only supplies the defaults a board starts with.
+// These are filled in from ChesterNet at the top of setup().
+const char* ssid = nullptr;
+const char* password = nullptr;
 
-// WiFi Configuration
-const char* ssid = SECRET_WIFI_SSID;
-const char* password = SECRET_WIFI_PASSWORD;
-
-// MQTT Configuration - Connect to Mosquitto broker on GL-AR300M16 router
-const char* mqtt_server = "192.168.8.1";  // Router IP address
-const int mqtt_port = 1883;
+// MQTT Configuration
+const char* mqtt_server = nullptr;
+int mqtt_port = 1883;
 const char* mqtt_user = "";  // No username
 const char* mqtt_password = "";  // No password
 
 // OTA Configuration
 const char* otaHostname = "CabLock-KitchenUpperPassSide";
-const char* otaPassword = SECRET_OTA_PASSWORD;
+const char* otaPassword = nullptr;
 
 // MQTT Client ID - Unique per device
 String mqtt_client_id = String("CabLock_") + String(CABINET_ID);
@@ -51,7 +49,9 @@ const unsigned long SERVO_MOVE_MS = 500;  // Time the servo is driven before it 
 // Lock state is persisted so a reboot (e.g. a brownout while cranking the
 // engine) puts the latch back where it was instead of reporting a state the
 // servo was never actually driven to.
-#define EEPROM_SIZE 8
+// The size must be ChesterNet's: it keeps the network settings in the same
+// EEPROM sector, above CHESTERNET_EEPROM_OFFSET.
+#define EEPROM_SIZE CHESTERNET_EEPROM_SIZE
 #define EEPROM_MAGIC 0xCB
 #define EEPROM_ADDR_MAGIC 0
 #define EEPROM_ADDR_STATE 1
@@ -312,6 +312,18 @@ void setup() {
   Serial.print("Status Topic: ");
   Serial.println(topic_cabinetLock_status);
 
+  // Stored network settings (defaults from secrets.ini on first boot)
+  ChesterNet::begin(otaHostname, FIRMWARE_VERSION);
+  ssid = ChesterNet::wifiSsid();
+  password = ChesterNet::wifiPassword();
+  mqtt_server = ChesterNet::mqttHost();
+  mqtt_port = ChesterNet::mqttPort();
+  otaPassword = ChesterNet::devicePassword();
+  ChesterNet::onUpdateStart([]() {
+    // A browser upload blocks loop() until it finishes - leave the servo unpowered
+    if (lockServo.attached()) lockServo.detach();
+  });
+
   // Restore the saved lock position. Previously the servo was attached and
   // detached with no delay, so it never actually moved, yet UNLOCKED was reported.
   EEPROM.begin(EEPROM_SIZE);
@@ -415,13 +427,16 @@ void sendStatus() {
 }
 
 void loop() {
+  // Settings web page, browser firmware updates, setup hotspot
+  ChesterNet::loop();
+
   // WiFi: the core reconnects on its own; only restart the attempt occasionally
   if (WiFi.status() != WL_CONNECTED) {
     if (wifiWasConnected) {
       wifiWasConnected = false;
       Serial.println("WiFi disconnected (auto-reconnect running)");
     }
-    if (millis() - lastWifiKick >= WIFI_KICK_MS) {
+    if (millis() - lastWifiKick >= WIFI_KICK_MS && ChesterNet::wifiRetryAllowed()) {
       lastWifiKick = millis();
       Serial.println("WiFi still down - restarting connection attempt");
       WiFi.begin(ssid, password);

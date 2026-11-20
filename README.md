@@ -14,14 +14,14 @@ time.
 
 | Project | Hardware | Firmware | Responsibility |
 |---|---|---|---|
-| [`Plumbing`](Plumbing/) | ESP32-S2 Mini | `v3.5.0` | Hydronic valves, tank heaters, diesel + electric heat, water pump, exhaust fan, DHW solenoid, 5× DS18B20 (ROM-addressed), BME280, pressure, flow, RearPassSide lock |
-| [`FrontThermostat`](FrontThermostat/) | ESP32-S2 Mini | `v5.2.0` | Front zone PI climate control, fan coil, OLED, buttons, KitchenPassSide lock |
-| [`AltInverterCharger`](AltInverterCharger/) | ESP32-S2 Mini | `v1.1.1` | Inverter power button pulse, battery voltage, DS18B20 |
-| [`HX-Bypass`](HX-Bypass/) | Wemos D1 Mini | `v1.0.1` | Engine-coolant heat exchanger bypass valve |
-| [`TempSensorBus`](TempSensorBus/) | ESP32-S2 Mini | `v1.1.1` | Harness bring-up rig — 5× DS18B20 on one OneWire bus, address-based role assignment, identify-by-warming |
-| [`D1Mini_CabLock_KitchenDriverSide`](D1Mini_CabLock_KitchenDriverSide/) | D1 Mini Lite | `v3.1.0` | Cabinet lock servo |
-| [`D1Mini_CabLock_KitchenUpperPassSide`](D1Mini_CabLock_KitchenUpperPassSide/) | D1 Mini Lite | `v3.1.0` | Cabinet lock servo |
-| [`D1Mini_CabLock_RearDriverSide`](D1Mini_CabLock_RearDriverSide/) | D1 Mini Lite | `v3.1.0` | Cabinet lock servo |
+| [`Plumbing`](Plumbing/) | ESP32-S2 Mini | `v3.6.0` | Hydronic valves, tank heaters, diesel + electric heat, water pump, exhaust fan, DHW solenoid, 5× DS18B20 (ROM-addressed), BME280, pressure, flow, RearPassSide lock |
+| [`FrontThermostat`](FrontThermostat/) | ESP32-S2 Mini | `v5.3.0` | Front zone PI climate control, fan coil, OLED, buttons, KitchenPassSide lock |
+| [`AltInverterCharger`](AltInverterCharger/) | ESP32-S2 Mini | `v1.2.0` | Inverter power button pulse, battery voltage, DS18B20 |
+| [`HX-Bypass`](HX-Bypass/) | Wemos D1 Mini | `v1.1.0` | Engine-coolant heat exchanger bypass valve |
+| [`TempSensorBus`](TempSensorBus/) | ESP32-S2 Mini | `v1.2.0` | Harness bring-up rig — 5× DS18B20 on one OneWire bus, address-based role assignment, identify-by-warming |
+| [`D1Mini_CabLock_KitchenDriverSide`](D1Mini_CabLock_KitchenDriverSide/) | D1 Mini Lite | `v3.2.0` | Cabinet lock servo |
+| [`D1Mini_CabLock_KitchenUpperPassSide`](D1Mini_CabLock_KitchenUpperPassSide/) | D1 Mini Lite | `v3.2.0` | Cabinet lock servo |
+| [`D1Mini_CabLock_RearDriverSide`](D1Mini_CabLock_RearDriverSide/) | D1 Mini Lite | `v3.2.0` | Cabinet lock servo |
 
 ---
 
@@ -101,11 +101,17 @@ mosquitto_sub -h 192.168.8.1 -t '#' -v
 |---|---|
 | SSID | `Chester IOT` |
 | MQTT broker | `192.168.8.1:1883`, anonymous |
-| WiFi / OTA passwords | `secrets.ini` (gitignored) |
+| WiFi / OTA passwords | stored on each board; defaults from `secrets.ini` (gitignored) |
+| Settings + firmware update | `http://<hostname>.local/` from any browser |
 | Serial | 115200 baud |
 
-WiFi and OTA credentials are not in the code. They live in `secrets.ini` at the repo root (gitignored); copy `secrets.example.ini` to create it. Every `platformio.ini` loads it with `extra_configs` and passes the values in as `SECRET_*` build flags. Changing the
-network means editing that one file and reflashing every board.
+WiFi and OTA credentials are not in the code. Each ESP board stores its WiFi, MQTT broker
+and device password itself (`lib_shared/ChesterNet`), and they can be changed at
+`http://<hostname>.local/`. If a board loses its WiFi it opens a `<hostname>-Setup`
+hotspot, so a new network can be entered from a phone without reflashing. The defaults a
+board starts with come from `secrets.ini` at the repo root (gitignored; copy
+`secrets.example.ini`). Release firmware for installing from a browser is on GitHub
+Releases, built without any credentials. See [OTA_UPDATE_GUIDE.md](OTA_UPDATE_GUIDE.md).
 
 Static DHCP reservations on the router are recommended for every board. HX-Bypass is the
 only one that sets its own static IP in firmware (`192.168.8.140`).

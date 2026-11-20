@@ -94,3 +94,6 @@ Mopeka\ Testing/.vscode/.cache
 
 # Shared firmware credentials (template: secrets.example.ini)
 secrets.ini
+
+# Release firmware built by tools/build-release.sh (published on GitHub Releases)
+release/
