@@ -5,11 +5,11 @@ are hosted on larger controllers that had a spare GPIO.
 
 | Cabinet | Host | Servo pin | Firmware |
 |---|---|---|---|
-| KitchenDriverSide | `D1Mini_CabLock_KitchenDriverSide` | D4 (GPIO2) | `v3.2.0` |
-| KitchenUpperPassSide | `D1Mini_CabLock_KitchenUpperPassSide` | D4 (GPIO2) | `v3.2.0` |
-| RearDriverSide | `D1Mini_CabLock_RearDriverSide` | D4 (GPIO2) | `v3.2.0` |
-| KitchenPassSide | `FrontThermostat` (ESP32-S2) | GPIO8 | `v5.3.0` |
-| RearPassSide | `Plumbing` (ESP32-S2) | GPIO16 | `v3.6.0` |
+| KitchenDriverSide | `D1Mini_CabLock_KitchenDriverSide` | D4 (GPIO2) | `v3.2.1` |
+| KitchenUpperPassSide | `D1Mini_CabLock_KitchenUpperPassSide` | D4 (GPIO2) | `v3.2.1` |
+| RearDriverSide | `D1Mini_CabLock_RearDriverSide` | D4 (GPIO2) | `v3.2.1` |
+| KitchenPassSide | `FrontThermostat` (ESP32-S2) | GPIO8 | `v5.3.1` |
+| RearPassSide | `Plumbing` (ESP32-S2) | GPIO16 | `v3.6.1` |
 
 ---
 

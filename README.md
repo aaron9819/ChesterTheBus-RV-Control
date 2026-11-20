@@ -14,14 +14,14 @@ time.
 
 | Project | Hardware | Firmware | Responsibility |
 |---|---|---|---|
-| [`Plumbing`](Plumbing/) | ESP32-S2 Mini | `v3.6.0` | Hydronic valves, tank heaters, diesel + electric heat, water pump, exhaust fan, DHW solenoid, 5× DS18B20 (ROM-addressed), BME280, pressure, flow, RearPassSide lock |
-| [`FrontThermostat`](FrontThermostat/) | ESP32-S2 Mini | `v5.3.0` | Front zone PI climate control, fan coil, OLED, buttons, KitchenPassSide lock |
-| [`AltInverterCharger`](AltInverterCharger/) | ESP32-S2 Mini | `v1.2.0` | Inverter power button pulse, battery voltage, DS18B20 |
-| [`HX-Bypass`](HX-Bypass/) | Wemos D1 Mini | `v1.1.0` | Engine-coolant heat exchanger bypass valve |
-| [`TempSensorBus`](TempSensorBus/) | ESP32-S2 Mini | `v1.2.0` | Harness bring-up rig — 5× DS18B20 on one OneWire bus, address-based role assignment, identify-by-warming |
-| [`D1Mini_CabLock_KitchenDriverSide`](D1Mini_CabLock_KitchenDriverSide/) | D1 Mini Lite | `v3.2.0` | Cabinet lock servo |
-| [`D1Mini_CabLock_KitchenUpperPassSide`](D1Mini_CabLock_KitchenUpperPassSide/) | D1 Mini Lite | `v3.2.0` | Cabinet lock servo |
-| [`D1Mini_CabLock_RearDriverSide`](D1Mini_CabLock_RearDriverSide/) | D1 Mini Lite | `v3.2.0` | Cabinet lock servo |
+| [`Plumbing`](Plumbing/) | ESP32-S2 Mini | `v3.6.1` | Hydronic valves, tank heaters, diesel + electric heat, water pump, exhaust fan, DHW solenoid, 5× DS18B20 (ROM-addressed), BME280, pressure, flow, RearPassSide lock |
+| [`FrontThermostat`](FrontThermostat/) | ESP32-S2 Mini | `v5.3.1` | Front zone PI climate control, fan coil, OLED, buttons, KitchenPassSide lock |
+| [`AltInverterCharger`](AltInverterCharger/) | ESP32-S2 Mini | `v1.2.1` | Inverter power button pulse, battery voltage, DS18B20 |
+| [`HX-Bypass`](HX-Bypass/) | Wemos D1 Mini | `v1.1.1` | Engine-coolant heat exchanger bypass valve |
+| [`TempSensorBus`](TempSensorBus/) | ESP32-S2 Mini | `v1.2.1` | Harness bring-up rig — 5× DS18B20 on one OneWire bus, address-based role assignment, identify-by-warming |
+| [`D1Mini_CabLock_KitchenDriverSide`](D1Mini_CabLock_KitchenDriverSide/) | D1 Mini Lite | `v3.2.1` | Cabinet lock servo |
+| [`D1Mini_CabLock_KitchenUpperPassSide`](D1Mini_CabLock_KitchenUpperPassSide/) | D1 Mini Lite | `v3.2.1` | Cabinet lock servo |
+| [`D1Mini_CabLock_RearDriverSide`](D1Mini_CabLock_RearDriverSide/) | D1 Mini Lite | `v3.2.1` | Cabinet lock servo |
 
 ---
 

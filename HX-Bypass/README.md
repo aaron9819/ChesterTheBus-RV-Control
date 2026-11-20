@@ -1,6 +1,6 @@
 # Heat Exchanger Bypass
 
-Wemos D1 Mini (ESP8266) · `src/main.cpp` · firmware `v1.1.0` · env `d1_mini`
+Wemos D1 Mini (ESP8266) · `src/main.cpp` · firmware `v1.1.1` · env `d1_mini`
 OTA `HX-Bypass.local` · static IP `192.168.8.140`
 
 Drives the solenoid valve that bypasses the engine-coolant heat exchanger. When the

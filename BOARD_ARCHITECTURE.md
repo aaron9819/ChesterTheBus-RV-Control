@@ -25,7 +25,7 @@ Assistant) can be resynchronised at any time.
 ┌──┴────────┐ ┌───┴──────────┐ ┌────┴────────┐ ┌───┴──────────┐ ┌───┴──────────┐ ┌───┴──────────┐
 │ Plumbing  │ │FrontThermo-  │ │AltInverter- │ │ HX-Bypass    │ │ 3 × CabLock  │ │TempSensorBus │
 │ ESP32-S2  │ │stat ESP32-S2 │ │Charger S2   │ │ D1 Mini      │ │ D1 Mini Lite │ │ ESP32-S2     │
-│ v3.6.0    │ │ v5.3.0       │ │ v1.2.0      │ │ v1.1.0       │ │ v3.2.0       │ │ v1.2.0       │
+│ v3.6.1    │ │ v5.3.1       │ │ v1.2.1      │ │ v1.1.1       │ │ v3.2.1       │ │ v1.2.1       │
 └───────────┘ └──────────────┘ └─────────────┘ └──────────────┘ └──────────────┘ └──────────────┘
 ```
 
@@ -46,7 +46,7 @@ WiFi and OTA credentials are not in the code. They live in `secrets.ini` at the 
 
 ## 1. Plumbing — ESP32-S2 Mini
 
-**Source:** `Plumbing/src/main_esp32s2.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v3.6.0`
+**Source:** `Plumbing/src/main_esp32s2.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v3.6.1`
 **OTA host:** `Plumbing.local` · **MQTT client id:** `ESP32S2_Plumbing`
 
 The largest board and the authoritative source of truth for every hydronic valve and
@@ -139,7 +139,7 @@ Behaviour, automation rules, and safety interlocks: **[Plumbing/README.md](Plumb
 
 ## 2. FrontThermostat — ESP32-S2 Mini
 
-**Source:** `FrontThermostat/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v5.3.0`
+**Source:** `FrontThermostat/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v5.3.1`
 **OTA host:** `Thermostat-KitchenPassSide.local` · **Cabinet ID:** `KitchenPassSide`
 
 Front-zone climate control with a PI-controlled hydronic fan coil. It does not switch any
@@ -171,7 +171,7 @@ Behaviour, PI tuning, and button semantics: **[FrontThermostat/README.md](FrontT
 
 ## 3. AltInverterCharger — ESP32-S2 Mini
 
-**Source:** `AltInverterCharger/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v1.2.0`
+**Source:** `AltInverterCharger/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v1.2.1`
 **OTA host:** `AltInverterCharger.local`
 
 Pulses the inverter's momentary power button and monitors its supply battery.
@@ -192,7 +192,7 @@ Calibration, safety rate-limits, and topic list: **[AltInverterCharger/README.md
 
 ## 4. HX-Bypass — Wemos D1 Mini (ESP8266)
 
-**Source:** `HX-Bypass/src/main.cpp` · **Env:** `d1_mini` · **Firmware:** `v1.1.0`
+**Source:** `HX-Bypass/src/main.cpp` · **Env:** `d1_mini` · **Firmware:** `v1.1.1`
 **OTA host:** `HX-Bypass.local` · **Static IP:** `192.168.8.140`
 
 Drives the heat-exchanger bypass valve for engine coolant. The only board with a static IP
@@ -212,7 +212,7 @@ Control logic: **[HX-Bypass/README.md](HX-Bypass/README.md)**
 
 ## 5–7. Cabinet Locks — D1 Mini Lite (ESP8266) ×3
 
-**Envs:** `d1_mini_lite` · **Firmware:** `v3.2.0`
+**Envs:** `d1_mini_lite` · **Firmware:** `v3.2.1`
 
 | Directory | `CABINET_ID` | OTA hostname |
 |---|---|---|
@@ -233,7 +233,7 @@ Full behaviour and the per-board source differences: **[CABINET_LOCKS.md](CABINE
 
 ## 8. TempSensorBus — ESP32-S2 Mini
 
-**Source:** `TempSensorBus/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v1.2.0`
+**Source:** `TempSensorBus/src/main.cpp` · **Env:** `lolin_s2_mini` · **Firmware:** `v1.2.1`
 **OTA host:** `TempSensorBus.local`
 
 Bring-up rig for the five-sensor hydronic temperature harness. Not a control board — it

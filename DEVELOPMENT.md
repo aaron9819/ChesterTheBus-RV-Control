@@ -116,12 +116,12 @@ discovery payload.
 
 | Project | Version |
 |---|---|
-| FrontThermostat | `v5.3.0` |
-| Plumbing | `v3.6.0` |
-| Cabinet locks (×3) | `v3.2.0` |
-| AltInverterCharger | `v1.2.0` |
-| TempSensorBus | `v1.2.0` |
-| HX-Bypass | `v1.1.0` |
+| FrontThermostat | `v5.3.1` |
+| Plumbing | `v3.6.1` |
+| Cabinet locks (×3) | `v3.2.1` |
+| AltInverterCharger | `v1.2.1` |
+| TempSensorBus | `v1.2.1` |
+| HX-Bypass | `v1.1.1` |
 
 ## Firmware conventions
 

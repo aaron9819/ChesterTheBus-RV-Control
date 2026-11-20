@@ -1,6 +1,6 @@
 # Plumbing & Environment Controller
 
-ESP32-S2 Mini · `src/main_esp32s2.cpp` · firmware `v3.6.0` · env `lolin_s2_mini`
+ESP32-S2 Mini · `src/main_esp32s2.cpp` · firmware `v3.6.1` · env `lolin_s2_mini`
 
 The central board of the RV system. It owns every hydronic valve, both tank heaters, the
 diesel and electric heat sources, the main water pump, the exhaust fan, the domestic hot

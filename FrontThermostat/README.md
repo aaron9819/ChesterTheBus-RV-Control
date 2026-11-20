@@ -1,6 +1,6 @@
 # Front Thermostat
 
-ESP32-S2 Mini · `src/main.cpp` · firmware `v5.3.0` · env `lolin_s2_mini`
+ESP32-S2 Mini · `src/main.cpp` · firmware `v5.3.1` · env `lolin_s2_mini`
 Cabinet ID `KitchenPassSide` · OTA `Thermostat-KitchenPassSide.local`
 
 Front-zone climate control for a hydronic fan coil. It measures zone temperature with a

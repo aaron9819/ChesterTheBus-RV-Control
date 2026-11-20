@@ -14,7 +14,7 @@ covered by any of this and still update over USB only.
 
 1. Download the board's file from the repo's
    [Releases page](https://github.com/aaron9819/ChesterTheBus-RV-Control/releases/latest).
-   Each file is named after the board, for example `Plumbing-v3.6.0.bin`.
+   Each file is named after the board, for example `Plumbing-v3.6.1.bin`.
 2. On the bus WiFi, open `http://<hostname>.local/` (hostnames in the table below), or
    the board's IP address if `.local` names do not resolve on your device. Some Android
    phones need the IP.
@@ -46,8 +46,10 @@ the settings page opens on its own; if it doesn't, browse to `http://192.168.4.1
 the new WiFi details and save. The board keeps controlling its hardware the whole time, and
 the hotspot closes as soon as it is back on WiFi.
 
-While the hotspot is up, the boards' "network gone too long, restart" timers are paused. If
-nobody joins it for 15 minutes the board restarts once and tries again.
+While the hotspot is up, the board tries its saved network once a minute, for about 12 s,
+and never while a phone is connected to the hotspot. The boards' "network gone too long,
+restart" timers are paused. If nobody joins the hotspot for 15 minutes, the board restarts
+once and tries again.
 
 **Reset network settings** (on the settings page) puts back the settings built into the
 firmware. A Releases download has none built in, so on those the board goes straight to

@@ -10,7 +10,7 @@
 // ============================================
 // Set unique cabinet identifier for each D1 Mini
 #define CABINET_ID "KitchenUpperPassSide"  // Options: kitchen1, kitchen2, bathroom, bedroom, etc.
-#define FIRMWARE_VERSION "v3.2.0"
+#define FIRMWARE_VERSION "v3.2.1"
 
 // WiFi, MQTT broker and the device (OTA) password are stored on the board by
 // ChesterNet (lib_shared/ChesterNet) and editable at http://<hostname>.local/.

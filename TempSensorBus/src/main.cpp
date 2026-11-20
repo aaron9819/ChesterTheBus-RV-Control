@@ -11,7 +11,7 @@
 // CONFIGURATION
 // ============================================
 #define DEVICE_NAME "TempSensorBus"
-#define FIRMWARE_VERSION "v1.2.0"
+#define FIRMWARE_VERSION "v1.2.1"
 
 // WiFi, MQTT broker and the device (OTA) password are stored on the board by
 // ChesterNet (lib_shared/ChesterNet) and editable at http://<hostname>.local/.

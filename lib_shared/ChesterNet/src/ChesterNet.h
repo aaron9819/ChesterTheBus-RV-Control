@@ -14,7 +14,7 @@
 //   setup():  ChesterNet::begin(hostname, FIRMWARE_VERSION);  -- before WiFi.begin
 //             then read ssid/password/broker/password from the getters below.
 //   loop():   ChesterNet::loop();                              -- every pass
-//   WiFi reconnect code:  only call WiFi.begin() when ChesterNet::wifiRetryAllowed()
+//   WiFi reconnect code:  only call WiFi.begin()/disconnect() when ChesterNet::wifiRetryAllowed()
 //   "restart if the network is gone" code: skip while ChesterNet::portalActive()
 //
 // Release builds (-D CHESTER_RELEASE_BUILD) compile in NO credentials: a board
@@ -59,8 +59,9 @@ void applyStaticIp();
 // True while the setup hotspot is up.
 bool portalActive();
 
-// False while someone is connected to the setup hotspot: a board's own WiFi
-// reconnect attempts would make the radio channel-hop and drop the phone.
+// False while the setup hotspot is up. ChesterNet then retries the saved
+// network itself, once a minute: every connection attempt makes the radio scan
+// all channels, and a hotspot whose radio keeps leaving its channel is invisible.
 bool wifiRetryAllowed();
 
 // Called when a browser firmware upload starts / finishes. Use them to put

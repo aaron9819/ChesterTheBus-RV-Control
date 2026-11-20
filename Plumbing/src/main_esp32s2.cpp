@@ -27,7 +27,7 @@
 // - All relay status publishing (authoritative source for valve states)
 // ============================================================================
 
-#define FIRMWARE_VERSION "v3.6.0"
+#define FIRMWARE_VERSION "v3.6.1"
 #define CABINET_ID "RearPassSide"
 
 // ============================================================================
@@ -853,7 +853,8 @@ void setupWifi() {
 // the interface or device after repeated failures.
 bool ensureWifiConnected(unsigned long timeoutMs = 5000) {
   if (WiFi.status() == WL_CONNECTED) return true;
-  // Someone is on the setup hotspot: reconnect attempts would knock them off
+  // Setup hotspot is up: ChesterNet owns reconnecting (it keeps the radio on the
+  // hotspot channel; this function's back-to-back retries made it invisible)
   if (!ChesterNet::wifiRetryAllowed()) return false;
 
   unsigned long start = millis();

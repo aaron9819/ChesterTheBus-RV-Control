@@ -49,6 +49,13 @@ static const unsigned long PORTAL_DELAY_MS = 30000UL;
 // Hotspot up this long with nobody using it -> restart, as the boards' own
 // network-recovery restarts did before (they are suppressed while it is up).
 static const unsigned long PORTAL_IDLE_RESTART_MS = 15UL * 60UL * 1000UL;
+// While the hotspot is up, ChesterNet alone retries the saved network: one
+// attempt of PORTAL_STA_TRY_MS every PORTAL_STA_RETRY_MS. A connection attempt
+// makes the radio scan every channel, and the hotspot can only beacon on its own
+// - the boards' own back-to-back retries (Plumbing's ran about once a second)
+// kept the hotspot effectively invisible.
+static const unsigned long PORTAL_STA_RETRY_MS = 60000UL;
+static const unsigned long PORTAL_STA_TRY_MS = 12000UL;
 
 static const uint32_t STORE_MAGIC = 0x54454E43;   // "CNET"
 static const uint8_t  STORE_LAYOUT = 1;
@@ -86,7 +93,9 @@ static bool serverUp = false;
 
 static bool portal = false;
 static bool apSecured = false;
-static bool staPaused = false;
+static bool staTrying = false;
+static unsigned long staTryStart = 0;
+static unsigned long lastStaTry = 0;
 static char apSsid[33];
 static unsigned long wifiDownSince = 0;
 static unsigned long lastStationSeen = 0;
@@ -177,7 +186,7 @@ const char* mqttHost() { return cfg.mqttHost; }
 uint16_t mqttPort() { return cfg.mqttPort; }
 const char* devicePassword() { return cfg.devPass; }
 bool portalActive() { return portal; }
-bool wifiRetryAllowed() { return !(portal && WiFi.softAPgetStationNum() > 0); }
+bool wifiRetryAllowed() { return !portal; }
 void onUpdateStart(void (*fn)()) { updateStartCb = fn; }
 void onUpdateEnd(void (*fn)(bool)) { updateEndCb = fn; }
 
@@ -531,12 +540,17 @@ static void ensureServer() {
 // Setup hotspot
 // ----------------------------------------------------------------------------
 static void startPortal() {
+  // Stop the STA side hunting for the lost network first; loop() retries it on
+  // a slow schedule from here on.
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect();
   WiFi.mode(WIFI_AP_STA);
   apSecured = strlen(cfg.devPass) >= 8;
   WiFi.softAP(apSsid, apSecured ? cfg.devPass : nullptr);
   dns.start(53, "*", WiFi.softAPIP());
   portal = true;
-  staPaused = false;
+  staTrying = false;
+  lastStaTry = millis();
   lastStationSeen = millis();
   ensureServer();
   Serial.printf("ChesterNet: WiFi unavailable - setup hotspot \"%s\" up at http://%s/\n",
@@ -547,8 +561,9 @@ static void stopPortal() {
   dns.stop();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   portal = false;
-  staPaused = false;
+  staTrying = false;
   Serial.println("ChesterNet: WiFi is back - setup hotspot off");
 }
 
@@ -618,17 +633,21 @@ void loop() {
     int stations = WiFi.softAPgetStationNum();
     if (stations > 0) lastStationSeen = now;
 
-    // While a phone is on the hotspot, stop the STA side hunting for the old
-    // network - its channel scans knock the phone off. Resume when it leaves.
-    if (stations > 0 && !staPaused && !sta) {
-      staPaused = true;
-      WiFi.setAutoReconnect(false);
-      WiFi.disconnect();
-    } else if (stations == 0 && staPaused) {
-      staPaused = false;
-      WiFi.setAutoReconnect(true);
+    // Slow retry of the saved network. Never while a phone is on the hotspot -
+    // the channel scan would knock it off.
+    if (stations > 0) {
+      if (staTrying && !sta) WiFi.disconnect();
+      staTrying = false;
+      lastStaTry = now;
+    } else if (!staTrying && cfg.ssid[0] && now - lastStaTry >= PORTAL_STA_RETRY_MS) {
+      staTrying = true;
+      staTryStart = now;
+      lastStaTry = now;
       applyStaticIp();
       WiFi.begin(cfg.ssid, cfg.wifiPass);
+    } else if (staTrying && !sta && now - staTryStart >= PORTAL_STA_TRY_MS) {
+      staTrying = false;
+      WiFi.disconnect();
     }
 
     if (stations == 0 && now - lastStationSeen >= PORTAL_IDLE_RESTART_MS) {

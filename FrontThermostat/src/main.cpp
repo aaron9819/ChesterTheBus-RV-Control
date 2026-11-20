@@ -21,7 +21,7 @@
 // CONFIGURATION
 // ============================================
 #define CABINET_ID "KitchenPassSide"
-#define FIRMWARE_VERSION "v5.3.0"
+#define FIRMWARE_VERSION "v5.3.1"
 
 // WiFi Configuration - filled in from ChesterNet at the top of setup()'s WiFi section
 const char* ssid = nullptr;

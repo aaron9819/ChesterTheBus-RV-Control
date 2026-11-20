@@ -1,6 +1,6 @@
 # TempSensorBus
 
-ESP32-S2 Mini · `src/main.cpp` · firmware `v1.2.0` · env `lolin_s2_mini`
+ESP32-S2 Mini · `src/main.cpp` · firmware `v1.2.1` · env `lolin_s2_mini`
 
 A bring-up rig for the five DS18B20 sensors that will live on one shared OneWire bus. It
 exists to answer three questions while the harness is being built, without a laptop under

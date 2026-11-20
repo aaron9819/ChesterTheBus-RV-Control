@@ -7,7 +7,7 @@
 // CONFIGURATION
 // ============================================
 #define DEVICE_ID "HX-Bypass"
-#define FIRMWARE_VERSION "v1.1.0"
+#define FIRMWARE_VERSION "v1.1.1"
 
 // WiFi, MQTT broker, static IP and the device (OTA) password are stored on the
 // board by ChesterNet (lib_shared/ChesterNet) and editable at
