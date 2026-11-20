@@ -46,9 +46,6 @@ namespace ChesterNet {
 // Off WiFi this long before the setup hotspot appears. Shorter than every
 // board's own "network gone - restart" timer, so the hotspot always gets a chance.
 static const unsigned long PORTAL_DELAY_MS = 30000UL;
-// Hotspot up this long with nobody using it -> restart, as the boards' own
-// network-recovery restarts did before (they are suppressed while it is up).
-static const unsigned long PORTAL_IDLE_RESTART_MS = 15UL * 60UL * 1000UL;
 // While the hotspot is up, ChesterNet alone retries the saved network: one
 // attempt of PORTAL_STA_TRY_MS every PORTAL_STA_RETRY_MS. A connection attempt
 // makes the radio scan every channel, and the hotspot can only beacon on its own
@@ -98,7 +95,6 @@ static unsigned long staTryStart = 0;
 static unsigned long lastStaTry = 0;
 static char apSsid[33];
 static unsigned long wifiDownSince = 0;
-static unsigned long lastStationSeen = 0;
 static unsigned long restartAt = 0;
 
 static void (*updateStartCb)() = nullptr;
@@ -432,7 +428,11 @@ static void handleUpdatePage() {
   p += F("</b>. The board keeps working until the upload finishes, then restarts on the new "
          "firmware; settings are kept. Don't close this page during the upload.</p>"
          "<form id='f' method='POST' action='/update' enctype='multipart/form-data'>"
-         "<input type='file' name='firmware' accept='.bin' required>"
+         // No accept='.bin': iOS/Android don't know the extension and grey out
+         // every file. The board checks the file name itself.
+         "<input type='file' name='firmware' id='file' required "
+         "onchange=\"var f=this.files[0];document.getElementById('st').textContent="
+         "f?('Selected: '+f.name+' ('+Math.round(f.size/1024)+' KB)'):'';\">"
          "<label style='font-weight:normal'><input type='checkbox' id='force'> The file name is "
          "different, install it anyway</label>"
          "<button type='submit' id='go'>Upload and install</button></form>"
@@ -551,7 +551,6 @@ static void startPortal() {
   portal = true;
   staTrying = false;
   lastStaTry = millis();
-  lastStationSeen = millis();
   ensureServer();
   Serial.printf("ChesterNet: WiFi unavailable - setup hotspot \"%s\" up at http://%s/\n",
                 apSsid, WiFi.softAPIP().toString().c_str());
@@ -630,8 +629,10 @@ void loop() {
   }
 
   if (portal) {
+    // No restart while the hotspot is up, however long it lasts: every board
+    // re-drives its outputs at boot (the cabinet locks audibly), and the slow
+    // retry below already reconnects as soon as the network is back.
     int stations = WiFi.softAPgetStationNum();
-    if (stations > 0) lastStationSeen = now;
 
     // Slow retry of the saved network. Never while a phone is on the hotspot -
     // the channel scan would knock it off.
@@ -648,12 +649,6 @@ void loop() {
     } else if (staTrying && !sta && now - staTryStart >= PORTAL_STA_TRY_MS) {
       staTrying = false;
       WiFi.disconnect();
-    }
-
-    if (stations == 0 && now - lastStationSeen >= PORTAL_IDLE_RESTART_MS) {
-      Serial.println("ChesterNet: no WiFi for a long time and nobody on the hotspot - restarting");
-      delay(100);
-      ESP.restart();
     }
   }
 

@@ -314,6 +314,12 @@ enum LockState {
 LockState currentLockState = STATE_UNKNOWN;
 #define LOCKED_POSITION 90
 #define UNLOCKED_POSITION 5
+// Lock/unlock speed: swept one degree at a time at about 30% of the servo's own
+// full speed - ~7 ms/degree, about 0.6 s for the 85 degree throw. Raise
+// SERVO_MS_PER_DEGREE to slow it further.
+const unsigned long SERVO_MS_PER_DEGREE = 7;
+const unsigned long SERVO_SETTLE_MS = 300;   // Held at the end position before release
+int lockServoPosition = -1;                  // Last commanded angle; -1 until the first move after boot
 
 // Temperature Readings
 float hydronicTemp = -999.0;        // Buffer tank ("buffer_tank" position)
@@ -2747,17 +2753,30 @@ void controlElectricHeater(bool turnOn) {
 // ============================================================================
 // CABINET LOCK CONTROL
 // ============================================================================
-void lockCabinet() {
+// Sweep the lock servo to a position at the reduced speed, hold, release.
+// The first call after boot holds the saved position instead of sweeping from
+// a guessed angle.
+void driveLockServo(int position) {
   if (!lockServo.attached()) {
     lockServo.setPeriodHertz(50);
     lockServo.attach(SERVO_PIN, 500, 2400);
   }
-
-  lockServo.write(LOCKED_POSITION);
-  currentLockState = STATE_LOCKED;
-  delay(500);
-
+  if (lockServoPosition >= 0) {
+    int step = (position > lockServoPosition) ? 1 : -1;
+    for (int angle = lockServoPosition; angle != position; angle += step) {
+      lockServo.write(angle);
+      delay(SERVO_MS_PER_DEGREE);
+    }
+  }
+  lockServo.write(position);
+  lockServoPosition = position;
+  delay(SERVO_SETTLE_MS);
   lockServo.detach();
+}
+
+void lockCabinet() {
+  driveLockServo(LOCKED_POSITION);
+  currentLockState = STATE_LOCKED;
 
   saveValveStatesToEEPROM();
   client.publish(Topic_CabLock_Status, "LOCKED", true);
@@ -2765,16 +2784,8 @@ void lockCabinet() {
 }
 
 void unlockCabinet() {
-  if (!lockServo.attached()) {
-    lockServo.setPeriodHertz(50);
-    lockServo.attach(SERVO_PIN, 500, 2400);
-  }
-
-  lockServo.write(UNLOCKED_POSITION);
+  driveLockServo(UNLOCKED_POSITION);
   currentLockState = STATE_UNLOCKED;
-  delay(500);
-
-  lockServo.detach();
 
   saveValveStatesToEEPROM();
   client.publish(Topic_CabLock_Status, "UNLOCKED", true);
@@ -3086,11 +3097,7 @@ void restoreValveStatesFromEEPROM() {
 
   // Drive the cabinet lock straight to its saved position (no unlock-first)
   currentLockState = savedLockState ? STATE_LOCKED : STATE_UNLOCKED;
-  lockServo.setPeriodHertz(50);
-  lockServo.attach(SERVO_PIN, 500, 2400);
-  lockServo.write(savedLockState ? LOCKED_POSITION : UNLOCKED_POSITION);
-  delay(500);
-  lockServo.detach();
+  driveLockServo(savedLockState ? LOCKED_POSITION : UNLOCKED_POSITION);
 
   Serial.println("  ✓ Hardware relays restored from EEPROM");
   Serial.println("  Fresh Water Heater: " + String(freshWaterHeaterOn ? "ON" : "OFF"));

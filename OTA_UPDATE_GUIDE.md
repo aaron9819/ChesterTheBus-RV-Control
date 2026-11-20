@@ -48,8 +48,8 @@ the hotspot closes as soon as it is back on WiFi.
 
 While the hotspot is up, the board tries its saved network once a minute, for about 12 s,
 and never while a phone is connected to the hotspot. The boards' "network gone too long,
-restart" timers are paused. If nobody joins the hotspot for 15 minutes, the board restarts
-once and tries again.
+restart" timers are paused, so a board without WiFi does not restart, however long the
+outage lasts.
 
 **Reset network settings** (on the settings page) puts back the settings built into the
 firmware. A Releases download has none built in, so on those the board goes straight to

@@ -90,7 +90,11 @@ const char* topic_availability = "ThermostatAvailability";  // LWT: online / off
 // Lock positions
 #define LOCKED_POSITION 90
 #define UNLOCKED_POSITION 5
-const unsigned long SERVO_MOVE_MS = 1000;
+// Lock/unlock speed: the servo is swept rather than sent straight to the end
+// position, at about 30% of its own full speed - ~7 ms/degree, about 0.6 s for
+// the 85 degree throw. Raise SERVO_MS_PER_DEGREE to slow it further.
+const unsigned long SERVO_MS_PER_DEGREE = 7;
+const unsigned long SERVO_SETTLE_MS = 500;  // Held at the end position before release
 
 // ============================================
 // STATE TYPES
@@ -305,7 +309,11 @@ String lastFrameSig = "";
 
 // Servo
 bool servoMoving = false;
-unsigned long servoMoveStart = 0;
+unsigned long servoMoveStart = 0;   // Sweep start, then (once arrived) settle start
+int servoPos = -1;                  // Current commanded angle; -1 until the first move after boot
+int servoFrom = 0;
+int servoTarget = 0;
+bool servoArrived = false;
 
 // Networking
 bool wifiDown = false;
@@ -753,13 +761,38 @@ void publishHomeAssistantDiscovery() {
 // ============================================
 void moveServo(int position) {
   if (!lockServo.attached()) lockServo.attach(SERVO_PIN);
-  lockServo.write(position);
+  if (servoPos < 0) {
+    // First move after boot: the latch should already be at its saved
+    // position, so hold it there rather than sweep from a guessed angle
+    servoPos = position;
+    lockServo.write(position);
+  }
+  servoFrom = servoPos;              // a new command mid-sweep continues from where it is
+  servoTarget = position;
+  servoArrived = (servoFrom == servoTarget);
   servoMoving = true;
   servoMoveStart = millis();
 }
 
 void handleServo(unsigned long now) {
-  if (servoMoving && now - servoMoveStart >= SERVO_MOVE_MS) {
+  if (!servoMoving) return;
+  if (!servoArrived) {
+    // Position follows elapsed time, so the speed does not depend on how
+    // often loop() gets here
+    int span = abs(servoTarget - servoFrom);
+    int done = (int)min((unsigned long)span, (now - servoMoveStart) / SERVO_MS_PER_DEGREE);
+    int pos = servoFrom + ((servoTarget > servoFrom) ? done : -done);
+    if (pos != servoPos) {
+      servoPos = pos;
+      lockServo.write(pos);
+    }
+    if (done >= span) {
+      servoArrived = true;
+      servoMoveStart = now;          // settle timer starts on arrival
+    }
+    return;
+  }
+  if (now - servoMoveStart >= SERVO_SETTLE_MS) {
     lockServo.detach();
     servoMoving = false;
   }

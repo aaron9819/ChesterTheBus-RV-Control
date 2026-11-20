@@ -44,7 +44,13 @@ Servo lockServo;
 // Lock positions (adjust based on your servo/latch mechanism)
 #define LOCKED_POSITION 90
 #define UNLOCKED_POSITION 5
-const unsigned long SERVO_MOVE_MS = 500;  // Time the servo is driven before it is released
+// Lock/unlock speed. The servo is stepped one degree at a time instead of being
+// sent straight to the end position, so it travels at about 30% of its own
+// full speed: ~7 ms/degree, about 0.6 s for the 85 degree throw, against
+// ~0.15-0.2 s for a typical SG90/MG90 at full speed. Raise to slow it further.
+const unsigned long SERVO_MS_PER_DEGREE = 7;
+const unsigned long SERVO_SETTLE_MS = 300;  // Held at the end position before release
+int servoPosition = -1;                     // Last commanded angle; -1 until the first move after boot
 
 // Lock state is persisted so a reboot (e.g. a brownout while cranking the
 // engine) puts the latch back where it was instead of reporting a state the
@@ -112,13 +118,25 @@ LockState loadLockState() {
   return STATE_UNLOCKED;  // Nothing saved yet
 }
 
-// Drive the servo to a position long enough for it to get there, then release it
+// Sweep the servo to a position at the reduced speed, hold it briefly, release it
 void moveServo(int position) {
   if (!lockServo.attached()) {
     lockServo.attach(SERVO_PIN);
   }
-  lockServo.write(position);
-  delay(SERVO_MOVE_MS);
+  if (servoPosition < 0) {
+    // First move after boot: the latch should already be at its saved
+    // position, so hold it there rather than sweep from a guessed angle
+    lockServo.write(position);
+  } else {
+    int step = (position > servoPosition) ? 1 : -1;
+    for (int angle = servoPosition; angle != position; angle += step) {
+      lockServo.write(angle);
+      delay(SERVO_MS_PER_DEGREE);
+    }
+    lockServo.write(position);
+  }
+  servoPosition = position;
+  delay(SERVO_SETTLE_MS);
   // Disable servo to save power and reduce noise
   lockServo.detach();
 }
